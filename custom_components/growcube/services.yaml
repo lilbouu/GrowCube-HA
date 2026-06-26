@@ -1,0 +1,248 @@
+water_plant:
+  name: Water plant
+  description: Water a plant for a specified duration on a specified channel
+  fields:
+    device_id:
+      name: Device
+      description: Growcube device
+      required: true
+      selector:
+        device:
+          integration: growcube
+    channel:
+      name: Channel
+      description: Channel on which the plant is located
+      required: true
+      example: 'A'
+      selector:
+        select:
+          options:
+            - "A"
+            - "B"
+            - "C"
+            - "D"
+    duration:
+      name: Duration
+      description: Duration for which to water the plant
+      required: true
+      default: 5
+      example: 5
+      selector:
+        number:
+          min: 5
+          max: 60
+set_scheduled_watering:
+  name: Scheduled watering
+  description: Setup scheduled watering
+  fields:
+    device_id:
+      name: Device
+      description: Growcube device
+      required: true
+      selector:
+        device:
+          integration: growcube
+    channel:
+      name: Channel
+      description: Channel on which plant is located
+      required: true
+      example: 'A'
+      selector:
+        select:
+          options:
+            - "A"
+            - "B"
+            - "C"
+            - "D"
+    duration:
+      name: Duration
+      description: Duration, seconds
+      required: true
+      default: 6
+      example: 6
+      selector:
+        number:
+          min: 0
+          max: 100
+    interval:
+      name: Interval
+      description: Interval, hours
+      required: true
+      default: 3
+      example: 3
+      selector:
+        number:
+          min: 1
+          max: 240
+    start_time:
+      name: First watering time
+      description: Optional first watering time for device-side scheduled watering
+      required: false
+      example: "14:30"
+      selector:
+        time:
+set_smart_watering:
+  name: Smart watering
+  description: Setup smart watering by soil moisture range
+  fields:
+    device_id:
+      name: Device
+      description: Growcube device
+      required: true
+      selector:
+        device:
+          integration: growcube
+    channel:
+      name: Channel
+      description: Channel on which plant is located
+      required: true
+      example: 'A'
+      selector:
+        select:
+          options:
+            - "A"
+            - "B"
+            - "C"
+            - "D"
+    min_moisture:
+      name: Minimum moisture
+      description: Smart watering lower soil moisture threshold
+      required: true
+      default: 20
+      example: 20
+      selector:
+        number:
+          min: 1
+          max: 99
+    max_moisture:
+      name: Maximum moisture
+      description: Smart watering upper soil moisture threshold
+      required: true
+      default: 60
+      example: 60
+      selector:
+        number:
+          min: 1
+          max: 99
+    all_day:
+      name: Daytime watering
+      description: Allow smart watering during daytime
+      required: true
+      default: true
+      selector:
+        boolean:
+delete_watering:
+  name: Delete watering
+  description: Disable automatic watering mode without clearing plant history
+  fields:
+    device_id:
+      name: Device
+      description: Growcube device
+      required: true
+      selector:
+        device:
+          integration: growcube
+    channel:
+      name: Channel
+      description: Channel on which plant is located
+      required: true
+      example: 'A'
+      selector:
+        select:
+          options:
+            - "A"
+            - "B"
+            - "C"
+            - "D"
+add_plant:
+  name: Add plant
+  description: Mark a GrowCube channel as an active plant and choose its initial watering mode
+  fields:
+    device_id:
+      name: Device
+      description: Growcube device
+      required: true
+      selector:
+        device:
+          integration: growcube
+    channel:
+      name: Channel
+      description: Channel where the plant is connected
+      required: true
+      example: 'A'
+      selector:
+        select:
+          options:
+            - "A"
+            - "B"
+            - "C"
+            - "D"
+    plant_name:
+      name: Plant name
+      description: Optional display name for the plant
+      required: false
+      selector:
+        text:
+    photo_url:
+      name: Photo URL
+      description: Optional image URL for the plant
+      required: false
+      selector:
+        text:
+    watering_mode:
+      name: Watering mode
+      description: Initial automatic watering mode
+      required: false
+      default: Disabled
+      selector:
+        select:
+          options:
+            - "Disabled"
+            - "Repeating"
+            - "Smart"
+end_plant:
+  name: End plant
+  description: Clear plant curve/history data and disable automatic watering
+  fields:
+    device_id:
+      name: Device
+      description: Growcube device
+      required: true
+      selector:
+        device:
+          integration: growcube
+    channel:
+      name: Channel
+      description: Channel on which plant is located
+      required: true
+      example: 'A'
+      selector:
+        select:
+          options:
+            - "A"
+            - "B"
+            - "C"
+            - "D"
+request_history:
+  name: Request history
+  description: Load stored moisture curve and watering records from GrowCube
+  fields:
+    device_id:
+      name: Device
+      description: Growcube device
+      required: true
+      selector:
+        device:
+          integration: growcube
+    channel:
+      name: Channel
+      description: Channel on which plant is located
+      required: true
+      example: 'A'
+      selector:
+        select:
+          options:
+            - "A"
+            - "B"
+            - "C"
+            - "D"

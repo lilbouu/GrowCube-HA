@@ -1,0 +1,308 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Provision GrowCube</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #111315;
+      --panel: #1b1d20;
+      --muted: #a4abb3;
+      --text: #eef2f4;
+      --line: #34383e;
+      --accent: #16a6d9;
+      --danger: #ff6255;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: radial-gradient(circle at top, #14232c, var(--bg) 32%);
+      color: var(--text);
+      font: 16px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    .page {
+      width: min(920px, 100%);
+      margin: 0 auto;
+      padding: 24px 16px 40px;
+    }
+    .hero, .panel {
+      background: color-mix(in srgb, var(--panel) 94%, transparent);
+      border: 1px solid var(--line);
+      border-radius: 24px;
+      padding: 20px;
+      backdrop-filter: blur(10px);
+    }
+    .hero { margin-bottom: 16px; }
+    h1, h2, h3, p { margin: 0; }
+    h1 { font-size: 34px; line-height: 1.05; margin-bottom: 10px; }
+    h2 { font-size: 22px; margin-bottom: 10px; }
+    p, li, label, textarea, input, code { color: var(--muted); }
+    .stack { display: grid; gap: 16px; }
+    .grid { display: grid; gap: 14px; }
+    @media (min-width: 760px) { .grid.two { grid-template-columns: 1fr 1fr; } }
+    label { display: grid; gap: 8px; font-weight: 600; color: var(--text); }
+    input, textarea {
+      width: 100%; border-radius: 14px; border: 1px solid var(--line);
+      background: #23262a; color: var(--text); padding: 14px 15px; font: inherit;
+    }
+    textarea { min-height: 180px; font-family: ui-monospace, SFMono-Regular, monospace; }
+    button {
+      min-height: 48px; border: 0; border-radius: 14px; padding: 0 18px;
+      background: var(--accent); color: white; font: inherit; font-weight: 700; cursor: pointer;
+    }
+    button.secondary { background: #2a2d31; color: var(--text); border: 1px solid var(--line); }
+    button:disabled { opacity: 0.5; cursor: default; }
+    .actions { display: flex; flex-wrap: wrap; gap: 12px; }
+    .hint { font-size: 14px; color: var(--muted); }
+    .status {
+      padding: 14px 16px; border-radius: 16px; border: 1px solid var(--line); background: #23262a;
+    }
+    .status.error { border-color: color-mix(in srgb, var(--danger) 46%, var(--line)); color: #ffd4d0; }
+    .status.success { border-color: color-mix(in srgb, var(--accent) 46%, var(--line)); color: #d6f4ff; }
+    .status code { color: inherit; }
+    ol { margin: 0; padding-left: 20px; display: grid; gap: 8px; }
+    .meta { display: grid; gap: 6px; font-size: 14px; }
+    .meta strong { color: var(--text); }
+    .command-card {
+      padding: 16px 18px; border-radius: 18px; border: 1px solid var(--line); background: #23262a;
+      overflow-x: auto;
+    }
+    .command-card code {
+      display: block; white-space: pre-wrap; word-break: break-word; color: var(--text);
+      font-size: 14px; line-height: 1.5;
+    }
+  </style>
+</head>
+<body>
+  <div class="page stack">
+    <section class="hero">
+      <h1>Provision GrowCube</h1>
+      <p>Prepare the setup command here, then use either a phone tool or a computer helper while connected to the GrowCube Wi-Fi. After the cube joins your home Wi-Fi, come back here and let Home Assistant discover it on your LAN.</p>
+    </section>
+
+    <section class="panel stack">
+      <h2>1. Prepare Wi-Fi Credentials</h2>
+      <div class="grid two">
+        <label>GrowCube AP SSID
+          <input id="cubeSsid" placeholder="ESP_... or GrowCube AP name">
+        </label>
+        <label>GrowCube AP password
+          <input id="cubePassword" value="88888888" placeholder="GrowCube AP password">
+        </label>
+        <label>Home Wi-Fi SSID
+          <input id="homeSsid" placeholder="Your router SSID">
+        </label>
+        <label>Home Wi-Fi password
+          <input id="homePassword" type="password" placeholder="Your router password">
+        </label>
+      </div>
+      <div class="actions">
+        <button id="prepare">Prepare Phone Helper Payload</button>
+      </div>
+      <p class="hint">This page cannot open a raw TCP socket by itself. It prepares the exact payload that a phone tool or local helper script must send to the GrowCube AP at <code>192.168.1.125:8800</code>.</p>
+    </section>
+
+    <section class="panel stack">
+      <h2>2. Send The Command On GrowCube Wi-Fi</h2>
+      <ol>
+        <li>Connect a phone or computer to the GrowCube Wi-Fi network.</li>
+        <li>Send the generated command exactly once to <code>192.168.1.125:8800</code>.</li>
+        <li>Wait for a response containing either <code>elea32</code> with a new IP, or an <code>elea31</code> error.</li>
+        <li>Reconnect the device back to your normal home Wi-Fi, then return here.</li>
+      </ol>
+      <div class="meta">
+        <div><strong>Success response:</strong> <code>elea32#...#&lt;ip&gt;#</code></div>
+        <div><strong>SSID not found:</strong> <code>elea31#1#1#</code></div>
+        <div><strong>Password/connect error:</strong> <code>elea31#1#6#</code></div>
+      </div>
+      <div class="stack">
+        <h3>Computer helper</h3>
+        <p class="hint">If this repository exists on your laptop or desktop, run this command from the repo root after joining the GrowCube Wi-Fi.</p>
+        <div class="command-card">
+          <code id="desktopCommandPreview">Generate the payload first to see the ready-to-run helper command.</code>
+        </div>
+        <div class="actions">
+          <button class="secondary" id="copyDesktopCommand">Copy Computer Command</button>
+        </div>
+      </div>
+      <div class="stack">
+        <h3>Android phone (Termux)</h3>
+        <p class="hint">If you use Android, install Termux plus Python once, then run this command while the phone is connected to the GrowCube Wi-Fi.</p>
+        <div class="command-card">
+          <code id="termuxCommandPreview">Generate the payload first to see the Android helper command.</code>
+        </div>
+        <div class="actions">
+          <button class="secondary" id="copyTermuxCommand">Copy Android Command</button>
+        </div>
+      </div>
+      <div class="stack">
+        <h3>Raw payload</h3>
+        <p class="hint">Use this only if you prefer some other raw-socket tool. Plain mobile Safari/Chrome still cannot send raw TCP directly.</p>
+        <div class="command-card">
+          <code id="commandPreview">Generate the payload first to see the exact raw TCP command.</code>
+        </div>
+        <label>Helper payload
+          <textarea id="payload" readonly placeholder="Generate the payload first"></textarea>
+        </label>
+        <div class="actions">
+          <button class="secondary" id="copyPayload">Copy Payload</button>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel stack">
+      <h2>3. Let Home Assistant Find The Cube</h2>
+      <p>After the helper sends credentials and GrowCube joins your LAN, Home Assistant can scan the current network and create the config entry.</p>
+      <div class="actions">
+        <button id="discover">Scan Current Network</button>
+        <button class="secondary" id="refresh">Refresh Status</button>
+      </div>
+      <div id="status" class="status">Session ready.</div>
+    </section>
+  </div>
+
+  <script>
+    (() => {
+      const statusEl = document.getElementById('status');
+      const payloadEl = document.getElementById('payload');
+      const commandPreviewEl = document.getElementById('commandPreview');
+      const desktopCommandPreviewEl = document.getElementById('desktopCommandPreview');
+      const termuxCommandPreviewEl = document.getElementById('termuxCommandPreview');
+      const prepareBtn = document.getElementById('prepare');
+      const discoverBtn = document.getElementById('discover');
+      const refreshBtn = document.getElementById('refresh');
+      const copyPayloadBtn = document.getElementById('copyPayload');
+      const copyDesktopCommandBtn = document.getElementById('copyDesktopCommand');
+      const copyTermuxCommandBtn = document.getElementById('copyTermuxCommand');
+      const queryToken = new URLSearchParams(window.location.search).get('token');
+      let currentToken = queryToken;
+
+      const setStatus = (text, kind = '') => {
+        statusEl.textContent = text;
+        statusEl.className = `status ${kind}`.trim();
+      };
+
+      const setBusy = (busy) => {
+        prepareBtn.disabled = busy;
+        discoverBtn.disabled = busy;
+        refreshBtn.disabled = busy;
+        copyPayloadBtn.disabled = busy;
+        copyDesktopCommandBtn.disabled = busy;
+        copyTermuxCommandBtn.disabled = busy;
+      };
+
+      const ensureSession = async () => {
+        if (currentToken) return currentToken;
+        const response = await fetch('/api/growcube/provision/session', { method: 'POST' });
+        const data = await response.json();
+        currentToken = data.token;
+        const url = new URL(window.location.href);
+        url.searchParams.set('token', data.token);
+        window.history.replaceState(null, '', url.toString());
+        return currentToken;
+      };
+
+      const parseResponse = async (response) => {
+        const data = await response.json();
+        if (!response.ok) {
+          throw new Error(data.message || data.error || 'Request failed');
+        }
+        return data;
+      };
+
+      const updatePayload = async () => {
+        try {
+          setBusy(true);
+          setStatus('Preparing helper payload...');
+          const token = await ensureSession();
+          const response = await fetch('/api/growcube/provision/session', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              token,
+              cube_ap_ssid: document.getElementById('cubeSsid').value,
+              cube_ap_password: document.getElementById('cubePassword').value,
+              home_ssid: document.getElementById('homeSsid').value,
+              home_password: document.getElementById('homePassword').value,
+            }),
+          });
+          const data = await parseResponse(response);
+          const helperPayload = data.helper_payload || {};
+          payloadEl.value = JSON.stringify(helperPayload, null, 2);
+          commandPreviewEl.textContent = helperPayload.command || 'Command unavailable';
+          desktopCommandPreviewEl.textContent = helperPayload.desktop_helper_command || 'Computer helper command unavailable';
+          termuxCommandPreviewEl.textContent = helperPayload.termux_helper_command || 'Android helper command unavailable';
+          setStatus('Payload prepared. Connect a phone or computer to GrowCube Wi-Fi, send the command once, then return here.', 'success');
+        } catch (error) {
+          setStatus(error.message || 'Could not prepare the payload.', 'error');
+        } finally {
+          setBusy(false);
+        }
+      };
+
+      const refreshStatus = async (discover = false) => {
+        try {
+          setBusy(true);
+          setStatus(discover ? 'Scanning your current LAN for GrowCube...' : 'Refreshing session status...');
+          const token = await ensureSession();
+          const url = `/api/growcube/provision/status?token=${encodeURIComponent(token)}${discover ? '&discover=1&create_entry=1' : ''}`;
+          const response = await fetch(url);
+          const data = await parseResponse(response);
+          if (data.completed && data.discovered_host) {
+            setStatus(`GrowCube found at ${data.discovered_host}. Home Assistant has already started creating the integration entry.`, 'success');
+          } else if (data.last_error) {
+            setStatus(data.last_error, 'error');
+          } else {
+            setStatus('No GrowCube discovered yet. Finish the phone step first, then try again.');
+          }
+        } catch (error) {
+          setStatus(error.message || 'Could not refresh provisioning status.', 'error');
+        } finally {
+          setBusy(false);
+        }
+      };
+
+      prepareBtn.addEventListener('click', updatePayload);
+      discoverBtn.addEventListener('click', () => refreshStatus(true));
+      refreshBtn.addEventListener('click', () => refreshStatus(false));
+      copyPayloadBtn.addEventListener('click', async () => {
+        if (!payloadEl.value) return;
+        try {
+          await navigator.clipboard.writeText(payloadEl.value);
+          setStatus('Helper payload copied.', 'success');
+        } catch (_error) {
+          setStatus('Clipboard access is unavailable on this phone. Copy the payload manually below.', 'error');
+        }
+      });
+
+      copyDesktopCommandBtn.addEventListener('click', async () => {
+        const command = desktopCommandPreviewEl.textContent || '';
+        if (!command || command.includes('unavailable') || command.includes('Generate the payload first')) return;
+        try {
+          await navigator.clipboard.writeText(command);
+          setStatus('Computer helper command copied.', 'success');
+        } catch (_error) {
+          setStatus('Clipboard access is unavailable. Copy the helper command manually.', 'error');
+        }
+      });
+
+      copyTermuxCommandBtn.addEventListener('click', async () => {
+        const command = termuxCommandPreviewEl.textContent || '';
+        if (!command || command.includes('unavailable') || command.includes('Generate the payload first')) return;
+        try {
+          await navigator.clipboard.writeText(command);
+          setStatus('Android helper command copied.', 'success');
+        } catch (_error) {
+          setStatus('Clipboard access is unavailable. Copy the Android helper command manually.', 'error');
+        }
+      });
+
+      ensureSession().catch((error) => {
+        setStatus(error.message || 'Could not start a provisioning session.', 'error');
+      });
+    })();
+  </script>
+</body>
+</html>

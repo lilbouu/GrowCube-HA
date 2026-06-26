@@ -1,0 +1,48 @@
+title: GrowCube
+views:
+  - title: GrowCube
+    path: growcube
+    panel: true
+    cards:
+      - type: custom:growcube-card
+        overview: dashboard
+
+  - title: Plant A
+    path: growcube-plant-a
+    subview: true
+    panel: true
+    cards:
+      - type: custom:growcube-card
+        name: Plant A
+        channel: Channel A
+        detail: true
+
+  - title: Plant B
+    path: growcube-plant-b
+    subview: true
+    panel: true
+    cards:
+      - type: custom:growcube-card
+        name: Plant B
+        channel: Channel B
+        detail: true
+
+  - title: Plant C
+    path: growcube-plant-c
+    subview: true
+    panel: true
+    cards:
+      - type: custom:growcube-card
+        name: Plant C
+        channel: Channel C
+        detail: true
+
+  - title: Plant D
+    path: growcube-plant-d
+    subview: true
+    panel: true
+    cards:
+      - type: custom:growcube-card
+        name: Plant D
+        channel: Channel D
+        detail: true

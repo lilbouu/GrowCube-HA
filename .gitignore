@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+*$py.class
+
+.DS_Store
+.idea/
+.vscode/
+
+.pytest_cache/
+.coverage
+htmlcov/
+
+.local/
+homeassistant/

@@ -1,0 +1,51 @@
+{
+  "title": "GrowCube",
+  "config": {
+    "step": {
+      "user": {
+        "menu_options": {
+          "search": "Search automatically",
+          "manual": "Enter IP manually"
+        }
+      },
+      "provision": {
+        "description": "GrowCube must first join your home Wi-Fi before Home Assistant can control it. Open this provisioning page on a phone or computer: %url% . Connect that device to the GrowCube Wi-Fi, send the generated setup command, then return to Home Assistant after the cube appears on your LAN.",
+        "data": {}
+      },
+      "search": {
+        "description": "Search for GrowCube devices on the local network. Leave Network range empty to scan Home Assistant's local IPv4 networks. If Home Assistant runs in Docker and cannot see your LAN, enter a range such as 192.168.0.0/24.",
+        "data": {
+          "network": "Network range"
+        },
+        "data_description": {
+          "network": "Optional IPv4 network range to scan, for example 192.168.0.0/24."
+        }
+      },
+      "select": {
+        "description": "Select the GrowCube device to add.",
+        "data": {
+          "device": "Device"
+        }
+      },
+      "manual": {
+        "description": "Enter the hostname or IP address of the GrowCube device.",
+        "data": {
+          "host": "Address"
+        },
+        "data_description": {
+          "host": "The hostname or IP address of the GrowCube device."
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Failed to connect",
+      "cannot_discover": "Could not find a local network to scan",
+      "invalid_network": "Invalid network range",
+      "no_devices_found": "No GrowCube devices found",
+      "unknown": "Unexpected error"
+    },
+    "abort": {
+      "already_configured": "Device is already configured"
+    }
+  }
+}

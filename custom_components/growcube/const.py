@@ -1,0 +1,22 @@
+"""Constants for the Growcube integration."""
+
+DOMAIN = "growcube"
+CHANNEL_NAME = ['A', 'B', 'C', 'D']
+CHANNEL_ID = ['a', 'b', 'c', 'd']
+SERVICE_WATER_PLANT = "water_plant"
+SERVICE_SET_SCHEDULED_WATERING = "set_scheduled_watering"
+SERVICE_SET_SMART_WATERING = "set_smart_watering"
+SERVICE_DELETE_WATERING = "delete_watering"
+SERVICE_ADD_PLANT = "add_plant"
+SERVICE_END_PLANT = "end_plant"
+SERVICE_REQUEST_HISTORY = "request_history"
+ARGS_CHANNEL = "channel"
+ARGS_PLANT_NAME = "plant_name"
+ARGS_PHOTO_URL = "photo_url"
+ARGS_WATERING_MODE = "watering_mode"
+ARGS_DURATION = "duration"
+ARGS_INTERVAL = "interval"
+ARGS_START_TIME = "start_time"
+ARGS_MIN_MOISTURE = "min_moisture"
+ARGS_MAX_MOISTURE = "max_moisture"
+ARGS_ALL_DAY = "all_day"
