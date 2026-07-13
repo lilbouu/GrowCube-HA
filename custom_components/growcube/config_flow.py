@@ -1,5 +1,6 @@
 """Config flow for the Growcube integration."""
-from ipaddress import ip_interface, ip_network, IPv4Network
+from ipaddress import ip_address, ip_interface, ip_network, IPv4Network
+import socket
 from typing import Optional, Dict, Any
 
 import voluptuous as vol
@@ -25,6 +26,10 @@ GROWCUBE_PORT = 8800
 SCAN_TIMEOUT = 0.35
 SCAN_CONCURRENCY = 64
 MAX_SCAN_HOSTS = 254
+COMMON_LAN_FALLBACK_NETWORKS = (
+    "192.168.0.0/24",
+    "192.168.1.0/24",
+)
 
 
 class GrowcubeConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
@@ -81,10 +86,7 @@ class GrowcubeConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     async def async_step_search(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         """Search the local network for GrowCube devices."""
         if user_input is None:
-            return self.async_show_form(
-                step_id="search",
-                data_schema=vol.Schema(SEARCH_SCHEMA),
-            )
+            user_input = {}
 
         errors = {}
         try:
@@ -189,7 +191,35 @@ class GrowcubeConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 )
                 networks.append(self._normalize_network(interface.network))
 
+        networks.extend(self._socket_ipv4_networks())
+        networks.extend(self._common_lan_fallback_networks())
         return list(dict.fromkeys(networks))
+
+    def _common_lan_fallback_networks(self) -> list[IPv4Network]:
+        """Return common LAN ranges when HA runs inside Docker."""
+        networks: list[IPv4Network] = []
+        for value in COMMON_LAN_FALLBACK_NETWORKS:
+            networks.append(self._normalize_network(ip_network(value, strict=False)))
+        return networks
+
+    def _socket_ipv4_networks(self) -> list[IPv4Network]:
+        """Return fallback IPv4 networks visible from the HA process."""
+
+        try:
+            addresses = socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET)
+        except OSError:
+            return []
+
+        networks: list[IPv4Network] = []
+        for _family, _type, _proto, _canon, sockaddr in addresses:
+            try:
+                address = ip_address(sockaddr[0])
+            except ValueError:
+                continue
+            if address.is_loopback or address.is_link_local:
+                continue
+            networks.append(self._normalize_network(ip_network(f"{address}/24", strict=False)))
+        return networks
 
     def _normalize_network(self, scan_network: IPv4Network) -> IPv4Network:
         """Limit network scan size to keep discovery quick and polite."""

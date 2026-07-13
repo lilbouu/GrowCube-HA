@@ -31,6 +31,7 @@ class GrowcubeWateringEvent:
     channel: int
     timestamp: datetime
     amount_ml: int | None = None
+    source: str = "last"
 
 
 @dataclass(slots=True)
@@ -38,6 +39,7 @@ class GrowcubeChannelConfig:
     """Home Assistant side channel watering settings."""
 
     configured: bool = False
+    plant_id: int = 0
     plant_name: str = ""
     photo_url: str = ""
     type_category: str = ""

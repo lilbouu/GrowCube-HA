@@ -16,6 +16,7 @@ import logging
 from .coordinator import GrowcubeDataCoordinator
 
 TANK_UNUSABLE_RESERVE_ML = 300
+GROWCUBE_TANK_CAPACITY_ML = 1500
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -144,10 +145,12 @@ class TankDaysLeftSensor(CoordinatorEntity[GrowcubeDataCoordinator], SensorEntit
     @property
     def native_value(self) -> float | None:
         state = self.coordinator.data.tank_state
+        capacity = self.coordinator.data.tank_config.capacity_ml
         daily_usage = self.coordinator.estimated_daily_usage_ml()
         if daily_usage <= 0:
             return None
-        usable_remaining_ml = max(0, state.remaining_ml - TANK_UNUSABLE_RESERVE_ML)
+        unusable_reserve_ml = TANK_UNUSABLE_RESERVE_ML if capacity == GROWCUBE_TANK_CAPACITY_ML else 0
+        usable_remaining_ml = max(0, state.remaining_ml - unusable_reserve_ml)
         return round(usable_remaining_ml / daily_usage, 1)
 
     @property
@@ -155,10 +158,12 @@ class TankDaysLeftSensor(CoordinatorEntity[GrowcubeDataCoordinator], SensorEntit
         forecast = self.coordinator.data.tank_forecast
         daily_usage = self.coordinator.estimated_daily_usage_ml()
         remaining_ml = self.coordinator.data.tank_state.remaining_ml
-        usable_remaining_ml = max(0, remaining_ml - TANK_UNUSABLE_RESERVE_ML)
+        capacity = self.coordinator.data.tank_config.capacity_ml
+        unusable_reserve_ml = TANK_UNUSABLE_RESERVE_ML if capacity == GROWCUBE_TANK_CAPACITY_ML else 0
+        usable_remaining_ml = max(0, remaining_ml - unusable_reserve_ml)
         return {
             "daily_usage_ml": round(daily_usage, 1) if daily_usage > 0 else None,
-            "unusable_reserve_ml": TANK_UNUSABLE_RESERVE_ML,
+            "unusable_reserve_ml": unusable_reserve_ml,
             "usable_remaining_ml": usable_remaining_ml,
             "firmware_forecast_known": forecast.known,
             "firmware_forecast_flags": forecast.flags,
@@ -236,6 +241,7 @@ class HistoryCountSensor(CoordinatorEntity[GrowcubeDataCoordinator], SensorEntit
             "history_points": len(channel.history),
             "type_category": channel.config.type_category,
             "type_description": channel.config.type_description,
+            "plant_id": channel.config.plant_id,
             "temp_min": channel.config.temp_min,
             "temp_max": channel.config.temp_max,
             "air_humidity_min": channel.config.air_humidity_min,
@@ -253,6 +259,7 @@ class HistoryCountSensor(CoordinatorEntity[GrowcubeDataCoordinator], SensorEntit
                 {
                     "timestamp": event.timestamp.isoformat(),
                     "amount_ml": event.amount_ml,
+                    "source": event.source,
                 }
                 for event in channel.watering_events
             ],

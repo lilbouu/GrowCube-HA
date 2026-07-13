@@ -90,16 +90,16 @@ def manual_watering_payload(channel: int, enabled: bool) -> str:
     return f"{channel_payload(channel)}@{1 if enabled else 0}"
 
 
-def watering_mode_payload(channel: int, mode: int, first_value: int, second_value: int) -> str:
+def watering_mode_payload(channel: int, mode: int, first_value: int, second_value: int, plant_id: int = 0) -> str:
     """Build command 49 payload."""
 
-    return f"{channel_payload(channel)}@{mode}@{first_value}@{second_value}"
+    return f"{channel_payload(channel)}@{mode}@{first_value}@{second_value}@{max(0, int(plant_id))}"
 
 
-def scheduled_watering_payload(channel: int, duration: int, interval: int, start_time: datetime) -> str:
+def scheduled_watering_payload(channel: int, duration: int, interval: int, start_time: datetime, plant_id: int = 0) -> str:
     """Build command 51 payload."""
 
-    return f"{channel_payload(channel)}@{duration}@{interval}@{growcube_local_epoch(start_time)}"
+    return f"{channel_payload(channel)}@{duration}@{interval}@{growcube_local_epoch(start_time)}@{max(0, int(plant_id))}"
 
 
 def time_sync_payload(value: datetime) -> str:

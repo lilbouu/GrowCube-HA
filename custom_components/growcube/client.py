@@ -21,6 +21,11 @@ from .protocol import (
 _LOGGER = logging.getLogger(__name__)
 
 GROWCUBE_PORT = 8800
+WATERING_SOURCE_BY_CODE = {
+    1: "smart",
+    2: "timed",
+    3: "manual",
+}
 
 
 class Channel(IntEnum):
@@ -127,6 +132,13 @@ class WateringRecordGrowcubeReport(GrowcubeReport):
 
 
 @dataclass(frozen=True, slots=True)
+class ExtendedWateringRecordGrowcubeReport(GrowcubeReport):
+    channel: Channel
+    timestamp: datetime
+    source: str
+
+
+@dataclass(frozen=True, slots=True)
 class HistoryCompleteGrowcubeReport(GrowcubeReport):
     channel: Channel
     success: bool
@@ -159,10 +171,15 @@ class TankForecastGrowcubeReport(GrowcubeReport):
 @dataclass(frozen=True, slots=True)
 class DelayedTimedWateringStateGrowcubeReport(GrowcubeReport):
     channel: Channel
+    mode: int
     enabled: bool
     duration_seconds: int
     interval_hours: int
     next_start_epoch: int
+    smart_min_moisture: int = 0
+    smart_max_moisture: int = 0
+    plant_id: int = 0
+    has_plant_id: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -185,6 +202,7 @@ class GrowcubeCommand:
     CMD_TANK_LEVEL = "52"
     CMD_TANK_FORECAST = "54"
     CMD_DELAYED_WATERING_STATE = "55"
+    CMD_EXTENDED_WATERING_HISTORY = "56"
 
     def __init__(self, command: str | int, payload: str | None = None) -> None:
         self.command = int(command)
@@ -226,6 +244,13 @@ class RequestHistoryCommand(GrowcubeCommand):
         super().__init__(self.CMD_HISTORY, channel_payload(channel.value))
 
 
+class RequestExtendedWateringHistoryCommand(GrowcubeCommand):
+    """Command 56 - request channel watering history with source."""
+
+    def __init__(self, channel: Channel) -> None:
+        super().__init__(self.CMD_EXTENDED_WATERING_HISTORY, channel_payload(channel.value))
+
+
 class PlantEndCommand(GrowcubeCommand):
     """Command 45 - clear plant/curve data."""
 
@@ -262,7 +287,7 @@ class RequestDelayedTimedWateringStateCommand(GrowcubeCommand):
     def __init__(self, channel: Channel | None = None) -> None:
         super().__init__(
             self.CMD_DELAYED_WATERING_STATE,
-            "" if channel is None else channel_payload(channel.value),
+            "v3" if channel is None else channel_payload(channel.value),
         )
 
 
@@ -349,7 +374,7 @@ class GrowcubeClient:
         else:
             data = command
 
-        if data.startswith(b"elea48#") or data.startswith(b"a48#"):
+        if data.startswith(b"elea48#") or data.startswith(b"a48#") or data.startswith(b"elea55#") or data.startswith(b"elea56#"):
             _LOGGER.warning("GrowCube history TX: %s", data.decode("ascii", errors="replace"))
         self._writer.write(data)
         await self._writer.drain()
@@ -375,7 +400,7 @@ class GrowcubeClient:
                     break
                 buffer.extend(chunk)
                 for message in parse_messages(buffer):
-                    if message.command in (22, 23, 35, 36):
+                    if message.command in (22, 23, 35, 36, 55, 56):
                         _LOGGER.warning(
                             "GrowCube history RX elea%s payload=%s",
                             message.command,
@@ -434,6 +459,14 @@ def _report_from_message(command: int, payload: str, raw: str) -> GrowcubeReport
                 return WateringRecordGrowcubeReport(
                     channel=Channel(parts[0]),
                     timestamp=datetime(parts[1], parts[2], parts[3], parts[4], parts[5]),
+                )
+        if command == 56:
+            parts = _split_ints(payload)
+            if len(parts) == 7:
+                return ExtendedWateringRecordGrowcubeReport(
+                    channel=Channel(parts[0]),
+                    timestamp=datetime(parts[1], parts[2], parts[3], parts[4], parts[5]),
+                    source=WATERING_SOURCE_BY_CODE.get(parts[6], "last"),
                 )
         if command == 24:
             fields = payload.split("@")
@@ -496,16 +529,32 @@ def _report_from_message(command: int, payload: str, raw: str) -> GrowcubeReport
                 )
         if command == 55:
             parts = _split_ints(payload)
+            if len(parts) >= 6 and parts[0] in (2, 3):
+                mode = parts[2]
+                if mode in (0, 1, 2, 3):
+                    return DelayedTimedWateringStateGrowcubeReport(
+                        channel=Channel(parts[1]),
+                        mode=mode,
+                        enabled=mode != 0,
+                        duration_seconds=max(0, parts[3]) if mode == 1 else 0,
+                        interval_hours=max(0, parts[4]) if mode == 1 else 0,
+                        next_start_epoch=max(0, parts[5]) if mode == 1 else 0,
+                        smart_min_moisture=max(0, parts[3]) if mode in (2, 3) else 0,
+                        smart_max_moisture=max(0, parts[4]) if mode in (2, 3) else 0,
+                        plant_id=max(0, parts[6]) if parts[0] == 3 and len(parts) > 6 else 0,
+                        has_plant_id=parts[0] == 3 and len(parts) > 6,
+                    )
             if len(parts) == 5:
                 return DelayedTimedWateringStateGrowcubeReport(
                     channel=Channel(parts[0]),
+                    mode=1 if parts[1] == 1 else 0,
                     enabled=parts[1] == 1,
                     duration_seconds=max(0, parts[2]),
                     interval_hours=max(0, parts[3]),
                     next_start_epoch=max(0, parts[4]),
                 )
     except (TypeError, ValueError):
-        if command in (22, 23, 35, 36):
+        if command in (22, 23, 35, 36, 55, 56):
             _LOGGER.warning("Could not parse GrowCube history report: %s", raw[:260])
         else:
             _LOGGER.debug("Could not parse GrowCube report: %s", raw)

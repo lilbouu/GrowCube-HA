@@ -33,13 +33,24 @@ class GrowcubeCard extends HTMLElement {
     this._plantWizardSmartMin = 20;
     this._plantWizardSmartMax = 60;
     this._plantWizardDaytime = true;
+    this._plantWizardCategory = "";
+    this._plantWizardDescription = "";
+    this._plantWizardTempMin = 0;
+    this._plantWizardTempMax = 0;
+    this._plantWizardAirHumidityMin = 0;
+    this._plantWizardAirHumidityMax = 0;
+    this._plantWizardPhotoUploading = false;
+    this._plantWizardPhotoFileName = "";
     this._plantWizardSearch = "";
     this._plantWizardResults = [];
     this._plantWizardResultPage = 0;
     this._plantWizardSelected = null;
     this._plantWizardCustom = false;
+    this._plantWizardCreateCustomOnly = false;
     this._plantWizardLoading = false;
     this._plantWizardError = "";
+    this._customPlantsOpen = false;
+    this._customPlantsPage = 0;
     this._history = [];
     this._historyEntity = "";
     this._historyLoading = false;
@@ -483,16 +494,41 @@ class GrowcubeCard extends HTMLElement {
     return points.map((point) => ({ ...point, x: xFor(point), y: yFor(point) }));
   }
 
+  _dateLocale() {
+    const haLanguage = this._hass?.locale?.language || this._hass?.language;
+    if (haLanguage) {
+      return haLanguage;
+    }
+    if (navigator.languages?.length) {
+      return navigator.languages;
+    }
+    return navigator.language || undefined;
+  }
+
+  _dateTimeOptions(options = {}) {
+    const result = { ...options };
+    if (!Object.prototype.hasOwnProperty.call(result, "hour") || Object.prototype.hasOwnProperty.call(result, "hour12")) {
+      return result;
+    }
+    const timeFormat = this._hass?.locale?.time_format;
+    if (timeFormat === "24") {
+      result.hour12 = false;
+    } else if (timeFormat === "12") {
+      result.hour12 = true;
+    }
+    return result;
+  }
+
   _formatChartHoverDate(timestamp) {
     if (!timestamp) {
       return "";
     }
-    return new Date(timestamp).toLocaleString(undefined, {
+    return new Date(timestamp).toLocaleString(this._dateLocale(), this._dateTimeOptions({
       month: "short",
       day: "numeric",
       hour: "2-digit",
       minute: "2-digit",
-    });
+    }));
   }
 
   _entityState(entityId, fallback = "Unknown") {
@@ -660,6 +696,24 @@ class GrowcubeCard extends HTMLElement {
     }
   }
 
+  async _configureChannelApi(channel = this._channelKey(), values = {}, apply = true) {
+    if (!this._hass?.callApi) {
+      return undefined;
+    }
+    const payload = { channel, apply };
+    const deviceId = this._deviceIdHint();
+    if (deviceId) {
+      payload.device_id = deviceId;
+    }
+    Object.entries(values).forEach(([key, value]) => {
+      if (value === undefined || value === null) {
+        return;
+      }
+      payload[key] = value;
+    });
+    return this._hass.callApi("POST", "growcube/channel/config", payload);
+  }
+
   _entityDisplay(entityId, fallback = "Unknown") {
     const state = this._state(entityId);
     if (!state || state.state === "unknown" || state.state === "unavailable") {
@@ -684,14 +738,14 @@ class GrowcubeCard extends HTMLElement {
     if (Number.isNaN(timestamp.getTime())) {
       return this._entityDisplay(entityId, fallback);
     }
-    const dateText = timestamp.toLocaleDateString(undefined, {
+    const dateText = timestamp.toLocaleDateString(this._dateLocale(), {
       day: "numeric",
       month: "long",
     });
-    const timeText = timestamp.toLocaleTimeString(undefined, {
+    const timeText = timestamp.toLocaleTimeString(this._dateLocale(), this._dateTimeOptions({
       hour: "2-digit",
       minute: "2-digit",
-    });
+    }));
     return `${dateText} ${timeText}`;
   }
 
@@ -968,13 +1022,8 @@ class GrowcubeCard extends HTMLElement {
   }
 
   async _disableModeWizard() {
-    const entities = this._entities();
     try {
-      if (!entities.mode) {
-        throw new Error("Mode entity is unavailable");
-      }
-      await this._setSelect(entities.mode, "Disabled");
-      await this._saveScheduleAfterEdit("Automatic watering disabled");
+      await this._saveScheduleAfterEdit("Automatic watering disabled", { mode: "Disabled" });
       this._modeWizardOpen = false;
       this._render();
     } catch (error) {
@@ -996,6 +1045,8 @@ class GrowcubeCard extends HTMLElement {
     this._plantWizardSmartMin = 20;
     this._plantWizardSmartMax = 60;
     this._plantWizardDaytime = true;
+    this._plantWizardPhotoUploading = false;
+    this._plantWizardPhotoFileName = "";
     this._plantWizardSearch = "";
     this._plantWizardResults = [];
     this._plantWizardResultPage = 0;
@@ -1009,28 +1060,51 @@ class GrowcubeCard extends HTMLElement {
 
   _closePlantWizard() {
     this._plantWizardOpen = false;
+    this._customPlantsOpen = false;
     this._render();
   }
 
   _setPlantWizardStep(step) {
-    this._plantWizardStep = this._clamp(Number(step), 0, 5);
+    this._plantWizardStep = this._clamp(Number(step), 0, this._plantWizardLastStep());
     this._render();
   }
 
   _canAdvancePlantWizard() {
+    if (this._plantWizardCreateCustomOnly && this._plantWizardStep === 0) {
+      return Boolean(this._plantWizardSelected) && this._plantWizardName.trim().length > 0;
+    }
     if (this._plantWizardStep === 0) {
       return Boolean(this._plantWizardSelected);
     }
-    if (this._plantWizardStep === 1) {
-      return Boolean(this._plantWizardSelected);
+    if (this._plantWizardCustom && this._plantWizardStep === 1) {
+      return Boolean(this._plantWizardSelected) && this._plantWizardName.trim().length > 0;
     }
-    if (this._plantWizardStep === 2) {
+    if (this._plantWizardStep === this._plantWizardChannelStepIndex()) {
       return Boolean(this._plantWizardChannel);
     }
-    if (this._plantWizardStep === 3) {
+    if (this._plantWizardStep === this._plantWizardModeStepIndex()) {
       return this._plantWizardMode === "Smart" || this._plantWizardMode === "Repeating";
     }
     return true;
+  }
+
+  _plantWizardLastStep() {
+    if (this._plantWizardCreateCustomOnly) {
+      return 2;
+    }
+    return this._plantWizardCustom ? 6 : 5;
+  }
+
+  _plantWizardChannelStepIndex() {
+    return this._plantWizardCustom ? 3 : 2;
+  }
+
+  _plantWizardModeStepIndex() {
+    return this._plantWizardCustom ? 4 : 3;
+  }
+
+  _plantWizardSettingsStepIndex() {
+    return this._plantWizardCustom ? 5 : 4;
   }
 
   async _confirmWatering() {
@@ -1063,10 +1137,115 @@ class GrowcubeCard extends HTMLElement {
     }
   }
 
+  async _uploadPlantWizardPhoto(file) {
+    if (!file) {
+      return;
+    }
+    if (!["image/jpeg", "image/png", "image/webp"].includes(file.type)) {
+      this._showError("Photo must be JPEG, PNG, or WebP");
+      return;
+    }
+    if (file.size > 1024 * 1024) {
+      this._showError("Photo must be 1 MB or smaller");
+      return;
+    }
+    if (!this._hass?.callApi) {
+      this._showError("Photo upload is unavailable");
+      return;
+    }
+    this._plantWizardPhotoUploading = true;
+    this._plantWizardPhotoFileName = file.name || "plant photo";
+    this._render();
+    try {
+      const dataUrl = await this._readFileAsDataUrl(file);
+      const result = await this._hass.callApi("POST", "growcube/plants/photo", {
+        filename: file.name || "plant-photo",
+        content_type: file.type,
+        data: String(dataUrl).split(",", 2)[1] || "",
+      });
+      this._plantWizardPhotoUrl = String(result?.url || "");
+      this._plantWizardPhotoUploading = false;
+      this._showToast("Photo uploaded");
+      this._render();
+    } catch (error) {
+      this._plantWizardPhotoUploading = false;
+      this._showError(error?.message || "Photo upload failed");
+      this._render();
+    }
+  }
+
+  _readFileAsDataUrl(file) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.addEventListener("load", () => resolve(reader.result || ""));
+      reader.addEventListener("error", () => reject(reader.error || new Error("Could not read photo")));
+      reader.readAsDataURL(file);
+    });
+  }
+
   async _confirmAddPlant() {
+    if (this._plantWizardCreateCustomOnly) {
+      if (!this._plantWizardName.trim()) {
+        this._showError("Plant name cannot be empty");
+        return;
+      }
+      this._rememberCustomPlantProfileFromWizard();
+      this._plantWizardOpen = false;
+      this._plantWizardCustom = false;
+      this._plantWizardCreateCustomOnly = false;
+      this._plantWizardSelected = null;
+      this._plantWizardStep = 0;
+      this._customPlantsOpen = true;
+      this._customPlantsPage = 0;
+      this._showToast("Custom plant saved");
+      this._render();
+      return;
+    }
     const channel = this._plantWizardChannel || this._firstAvailableChannel();
     const entities = this._entities(channel);
     try {
+      const selected = this._plantWizardSelected || {};
+      const values = {
+        configured: true,
+        plant_id: this._plantWizardCustom ? 0 : Number(selected.id) || 0,
+        plant_name: this._plantWizardName.trim() || selected.name || selected.display_name || "",
+        photo_url: this._plantWizardPhotoUrl.trim() || selected.image_url || "",
+        type_category: this._plantWizardCustom ? this._plantWizardCategory.trim() : selected.category || "",
+        type_description: this._plantWizardCustom ? this._plantWizardDescription.trim() : selected.description || "",
+        temp_min: this._plantWizardCustom ? this._plantWizardTempMin : selected.temp_min,
+        temp_max: this._plantWizardCustom ? this._plantWizardTempMax : selected.temp_max,
+        air_humidity_min: this._plantWizardCustom ? this._plantWizardAirHumidityMin : selected.air_humidity_min,
+        air_humidity_max: this._plantWizardCustom ? this._plantWizardAirHumidityMax : selected.air_humidity_max,
+        mode: this._normalizeMode(this._plantWizardMode || "Disabled"),
+        first_watering_time: this._plantWizardStartTime(),
+        amount_ml: this._plantWizardAmount,
+        interval_hours: this._plantWizardIntervalDays * 24,
+        smart_min_moisture: this._plantWizardSmartMin,
+        smart_max_moisture: this._plantWizardSmartMax,
+        smart_daytime_watering: this._plantWizardDaytime,
+      };
+      let directResult;
+      try {
+        directResult = await this._configureChannelApi(
+          channel,
+          values,
+          this._plantWizardMode === "Smart" || this._plantWizardMode === "Repeating",
+        );
+      } catch (error) {
+        console.warn("[GrowCube] channel config API failed, trying entity fallback", {
+          channel,
+          error: error?.message || String(error),
+        });
+      }
+      if (directResult) {
+        this._rememberCustomPlantProfileFromWizard();
+        this._plantWizardOpen = false;
+        this._customPlantsOpen = false;
+        this._dashboardDevicesLoadedAt = 0;
+        this._loadDashboardDevicesIfNeeded(true);
+        this._showToast("Plant added");
+        return;
+      }
       if (entities.name && this._plantWizardName.trim()) {
         await this._setText(entities.name, this._plantWizardName.trim());
       }
@@ -1103,6 +1282,8 @@ class GrowcubeCard extends HTMLElement {
         await this._press(entities.save);
       }
       this._plantWizardOpen = false;
+      this._customPlantsOpen = false;
+      this._rememberCustomPlantProfileFromWizard();
       this._showToast("Plant added");
     } catch (error) {
       this._showError(error?.message || "Could not add plant");
@@ -1145,12 +1326,148 @@ class GrowcubeCard extends HTMLElement {
     }
     this._plantWizardSelected = item;
     this._plantWizardCustom = false;
+    this._plantWizardCreateCustomOnly = false;
     this._plantWizardName = item.display_name || item.name || this._plantWizardName;
     this._plantWizardPhotoUrl = item.image_url || "";
+    this._plantWizardCategory = item.category || "";
+    this._plantWizardDescription = item.description || "";
+    this._plantWizardTempMin = this._clamp(Number(item.temp_min) || 0, -50, 100);
+    this._plantWizardTempMax = this._clamp(Number(item.temp_max) || 0, -50, 100);
+    this._plantWizardAirHumidityMin = this._clamp(Number(item.air_humidity_min) || 0, 0, 100);
+    this._plantWizardAirHumidityMax = this._clamp(Number(item.air_humidity_max) || 0, 0, 100);
     this._plantWizardMode = "Smart";
     this._plantWizardSmartMin = this._clamp(Number(item.moisture_min) || 20, 1, 98);
     this._plantWizardSmartMax = this._clamp(Number(item.moisture_max) || 60, this._plantWizardSmartMin + 1, 99);
     this._plantWizardStep = 1;
+    this._render();
+  }
+
+  _startCustomPlantWizard() {
+    const name = this._normalizeProfileText(this._plantWizardSearch) || "Custom plant";
+    const item = {
+      id: 0,
+      name: name.toLowerCase(),
+      display_name: name,
+      category: "Custom plant",
+      description: "",
+      image_url: "",
+      moisture_min: 20,
+      moisture_max: 60,
+      temp_min: 0,
+      temp_max: 0,
+      air_humidity_min: 0,
+      air_humidity_max: 0,
+    };
+    this._plantWizardSelected = item;
+    this._plantWizardCustom = true;
+    this._plantWizardCreateCustomOnly = true;
+    this._plantWizardOpen = true;
+    this._customPlantsOpen = false;
+    this._plantWizardName = name;
+    this._plantWizardPhotoUrl = "";
+    this._plantWizardPhotoFileName = "";
+    this._plantWizardCategory = "Custom plant";
+    this._plantWizardDescription = "";
+    this._plantWizardTempMin = 0;
+    this._plantWizardTempMax = 0;
+    this._plantWizardAirHumidityMin = 0;
+    this._plantWizardAirHumidityMax = 0;
+    this._plantWizardSmartMin = 20;
+    this._plantWizardSmartMax = 60;
+    this._plantWizardStep = 0;
+    this._render();
+  }
+
+  _customPlantStorageKey() {
+    return "growcube.customPlants";
+  }
+
+  _customPlantProfiles() {
+    try {
+      const items = JSON.parse(window.localStorage?.getItem(this._customPlantStorageKey()) || "[]");
+      return Array.isArray(items) ? items : [];
+    } catch (_error) {
+      return [];
+    }
+  }
+
+  _writeCustomPlantProfiles(items) {
+    try {
+      window.localStorage?.setItem(this._customPlantStorageKey(), JSON.stringify(items.slice(0, 40)));
+    } catch (error) {
+      console.warn("[GrowCube] custom plant library save failed", { error: error?.message || String(error) });
+    }
+  }
+
+  _customPlantProfileFromWizard() {
+    return {
+      id: 0,
+      name: this._plantWizardName.trim().toLowerCase(),
+      display_name: this._plantWizardName.trim(),
+      category: this._plantWizardCategory.trim() || "Custom plant",
+      description: this._plantWizardDescription.trim(),
+      image_url: this._plantWizardPhotoUrl,
+      moisture_min: this._plantWizardSmartMin,
+      moisture_max: this._plantWizardSmartMax,
+      temp_min: this._plantWizardTempMin,
+      temp_max: this._plantWizardTempMax,
+      air_humidity_min: this._plantWizardAirHumidityMin,
+      air_humidity_max: this._plantWizardAirHumidityMax,
+    };
+  }
+
+  _rememberCustomPlantProfileFromWizard() {
+    if (!this._plantWizardCustom || !this._plantWizardName.trim()) {
+      return;
+    }
+    const profile = this._customPlantProfileFromWizard();
+    const key = profile.display_name.toLowerCase();
+    const existing = this._customPlantProfiles().filter((item) => String(item.display_name || item.name || "").toLowerCase() !== key);
+    this._writeCustomPlantProfiles([profile, ...existing]);
+  }
+
+  _openCustomPlantsDialog() {
+    this._customPlantsOpen = true;
+    this._customPlantsPage = this._clamp(this._customPlantsPage, 0, Math.max(0, this._customPlantPages() - 1));
+    this._render();
+  }
+
+  _closeCustomPlantsDialog() {
+    this._customPlantsOpen = false;
+    this._render();
+  }
+
+  _selectCustomPlantProfile(index) {
+    const item = this._customPlantProfiles()[Number(index)];
+    if (!item) {
+      return;
+    }
+    this._plantWizardSelected = item;
+    this._plantWizardCustom = true;
+    this._plantWizardCreateCustomOnly = false;
+    this._customPlantsOpen = false;
+    this._plantWizardName = item.display_name || item.name || "Custom plant";
+    this._plantWizardPhotoUrl = item.image_url || "";
+    this._plantWizardPhotoFileName = "";
+    this._plantWizardCategory = item.category || "Custom plant";
+    this._plantWizardDescription = item.description || "";
+    this._plantWizardTempMin = this._clamp(Number(item.temp_min) || 0, -50, 100);
+    this._plantWizardTempMax = this._clamp(Number(item.temp_max) || 0, -50, 100);
+    this._plantWizardAirHumidityMin = this._clamp(Number(item.air_humidity_min) || 0, 0, 100);
+    this._plantWizardAirHumidityMax = this._clamp(Number(item.air_humidity_max) || 0, 0, 100);
+    this._plantWizardSmartMin = this._clamp(Number(item.moisture_min) || 20, 1, 98);
+    this._plantWizardSmartMax = this._clamp(Number(item.moisture_max) || 60, this._plantWizardSmartMin + 1, 99);
+    this._plantWizardMode = "Smart";
+    this._plantWizardStep = 1;
+    this._render();
+  }
+
+  _customPlantPages() {
+    return Math.max(1, Math.ceil(this._customPlantProfiles().length / 3));
+  }
+
+  _changeCustomPlantPage(delta) {
+    this._customPlantsPage = this._clamp(this._customPlantsPage + delta, 0, Math.max(0, this._customPlantPages() - 1));
     this._render();
   }
 
@@ -2784,6 +3101,7 @@ class GrowcubeCard extends HTMLElement {
       ${this._reservoirOpen ? this._reservoirDialogTemplate() : ""}
       ${this._editDialog ? this._editDialogTemplate() : ""}
       ${this._plantWizardOpen ? this._plantWizardDialogTemplate() : ""}
+      ${this._customPlantsOpen ? this._customPlantsDialogTemplate() : ""}
       ${this._modeWizardOpen ? this._modeWizardDialogTemplate() : ""}
       ${this._deletePlantDialogOpen ? this._deletePlantDialogTemplate() : ""}
       ${this._toast ? `<div class="toast">${this._escape(this._toast)}</div>` : ""}
@@ -3357,11 +3675,11 @@ class GrowcubeCard extends HTMLElement {
       return `<div class="chart-time${align === "end" ? " end" : ""}"></div>`;
     }
     const date = new Date(timestamp);
-    const timeText = date.toLocaleTimeString(undefined, {
+    const timeText = date.toLocaleTimeString(this._dateLocale(), this._dateTimeOptions({
       hour: "2-digit",
       minute: "2-digit",
-    });
-    const dateText = date.toLocaleDateString(undefined, {
+    }));
+    const dateText = date.toLocaleDateString(this._dateLocale(), {
       weekday: "short",
       month: "short",
       day: "numeric",
@@ -3579,12 +3897,12 @@ class GrowcubeCard extends HTMLElement {
     if (!timestamp) {
       return "";
     }
-    return new Date(timestamp).toLocaleString(undefined, {
+    return new Date(timestamp).toLocaleString(this._dateLocale(), this._dateTimeOptions({
       month: "short",
       day: "numeric",
       hour: "2-digit",
       minute: "2-digit",
-    });
+    }));
   }
 
   _overviewActivityItems() {
@@ -3913,28 +4231,40 @@ class GrowcubeCard extends HTMLElement {
   }
 
   _plantWizardDialogTemplate() {
-    const titles = ["Find plant", "Plant details", "Choose channel", "Watering mode", "Watering settings", "Review"];
+    const titles = this._plantWizardCreateCustomOnly
+      ? ["Name and photo", "Growing conditions", "Review"]
+      : this._plantWizardCustom
+        ? ["Find plant", "Name and photo", "Growing conditions", "Choose channel", "Watering mode", "Watering settings", "Review"]
+        : ["Find plant", "Plant details", "Choose channel", "Watering mode", "Watering settings", "Review"];
+    const steps = Array.from({ length: this._plantWizardLastStep() + 1 }, (_item, index) => index);
+    const channelStep = this._plantWizardChannelStepIndex();
+    const modeStep = this._plantWizardModeStepIndex();
+    const settingsStep = this._plantWizardSettingsStepIndex();
+    const lastStep = this._plantWizardLastStep();
     return `
       <div class="dialog-backdrop" data-action="close-plant-wizard">
         <div class="dialog" role="dialog" aria-modal="true" aria-label="Add plant">
           <div class="dialog-title">${titles[this._plantWizardStep] || "Add plant"}</div>
           <div class="wizard-progress">
-            ${[0, 1, 2, 3, 4, 5].map((step) => `<div class="wizard-dot ${step <= this._plantWizardStep ? "active" : ""}"></div>`).join("")}
+            ${steps.map((step) => `<div class="wizard-dot ${step <= this._plantWizardStep ? "active" : ""}"></div>`).join("")}
           </div>
           <div class="wizard-step">
-            ${this._plantWizardStep === 0 ? this._plantWizardSearchStep() : ""}
-            ${this._plantWizardStep === 1 ? this._plantWizardDetailsStep() : ""}
-            ${this._plantWizardStep === 2 ? this._plantWizardChannelStep() : ""}
-            ${this._plantWizardStep === 3 ? this._plantWizardWateringModeStep() : ""}
-            ${this._plantWizardStep === 4 ? this._plantWizardWateringSettingsStep() : ""}
-            ${this._plantWizardStep === 5 ? this._plantWizardReviewStep() : ""}
+            ${this._plantWizardCreateCustomOnly && this._plantWizardStep === 0 ? this._plantWizardDetailsStep() : ""}
+            ${this._plantWizardCreateCustomOnly && this._plantWizardStep === 1 ? this._plantWizardConditionsStep() : ""}
+            ${!this._plantWizardCreateCustomOnly && this._plantWizardStep === 0 ? this._plantWizardSearchStep() : ""}
+            ${!this._plantWizardCreateCustomOnly && this._plantWizardStep === 1 ? this._plantWizardDetailsStep() : ""}
+            ${!this._plantWizardCreateCustomOnly && this._plantWizardCustom && this._plantWizardStep === 2 ? this._plantWizardConditionsStep() : ""}
+            ${!this._plantWizardCreateCustomOnly && this._plantWizardStep === channelStep ? this._plantWizardChannelStep() : ""}
+            ${!this._plantWizardCreateCustomOnly && this._plantWizardStep === modeStep ? this._plantWizardWateringModeStep() : ""}
+            ${!this._plantWizardCreateCustomOnly && this._plantWizardStep === settingsStep ? this._plantWizardWateringSettingsStep() : ""}
+            ${this._plantWizardStep === lastStep ? this._plantWizardReviewStep() : ""}
           </div>
           <div class="dialog-actions">
             <button type="button" class="secondary" data-action="${this._plantWizardStep === 0 ? "close-plant-wizard-button" : "plant-wizard-back"}">
               ${this._plantWizardStep === 0 ? "Cancel" : "Back"}
             </button>
-            <button type="button" data-action="${this._plantWizardStep === 5 ? "confirm-add-plant" : "plant-wizard-next"}" ${this._canAdvancePlantWizard() ? "" : "disabled"}>
-              ${this._plantWizardStep === 5 ? "Add plant" : "Next"}
+            <button type="button" data-action="${this._plantWizardStep === lastStep ? "confirm-add-plant" : "plant-wizard-next"}" ${this._canAdvancePlantWizard() ? "" : "disabled"}>
+              ${this._plantWizardStep === lastStep ? (this._plantWizardCreateCustomOnly ? "Save plant" : "Add plant") : "Next"}
             </button>
           </div>
         </div>
@@ -4040,6 +4370,7 @@ class GrowcubeCard extends HTMLElement {
         <div class="compact-row">
           <input data-action="plant-wizard-search" value="${this._escape(this._plantWizardSearch)}" placeholder="basil, monstera, tomato">
           <button type="button" data-action="search-plant-catalog">Search</button>
+          <button type="button" class="secondary" data-action="open-custom-plants">Custom</button>
         </div>
       </label>
       ${
@@ -4062,9 +4393,100 @@ class GrowcubeCard extends HTMLElement {
     `;
   }
 
+  _customPlantsDialogTemplate() {
+    const profiles = this._customPlantProfiles();
+    const pageSize = 3;
+    const pageCount = this._customPlantPages();
+    const page = this._clamp(this._customPlantsPage, 0, pageCount - 1);
+    const visibleProfiles = profiles.slice(page * pageSize, page * pageSize + pageSize);
+    return `
+      <div class="dialog-backdrop" data-action="close-custom-plants">
+        <div class="dialog" role="dialog" aria-modal="true" aria-label="Custom plants">
+          <div class="dialog-title">Custom plants</div>
+          ${
+            profiles.length
+              ? `<div class="plants-list">
+                  ${visibleProfiles.map((item, index) => this._customPlantLibraryRowTemplate(item, page * pageSize + index)).join("")}
+                </div>`
+              : `<div class="empty-state">
+                  <div class="title">No custom plants yet</div>
+                  <div class="subtitle">Create a custom plant profile to reuse it when adding plants to channels.</div>
+                </div>`
+          }
+          ${profiles.length > pageSize ? `
+            <div class="dialog-actions">
+              <button type="button" class="secondary" data-action="custom-plants-prev" ${page <= 0 ? "disabled" : ""}>Previous</button>
+              <div class="label">Page ${page + 1} / ${pageCount}</div>
+              <button type="button" class="secondary" data-action="custom-plants-next" ${page >= pageCount - 1 ? "disabled" : ""}>Next</button>
+            </div>
+          ` : ""}
+          <div class="dialog-actions">
+            <button type="button" class="secondary" data-action="close-custom-plants-button">Close</button>
+            <button type="button" data-action="plant-wizard-custom">Add custom plant</button>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  _customPlantLibraryRowTemplate(item, index) {
+    const name = item.display_name || item.name || "Custom plant";
+    const imageUrl = item.image_url || item.photo_url || "";
+    return `
+      <div class="plant-row" data-action="select-custom-plant" data-index="${index}" role="button" tabindex="0">
+        <div class="plant-photo">
+          ${imageUrl ? `<img src="${this._escape(imageUrl)}" alt="">` : '<ha-icon icon="mdi:flower"></ha-icon>'}
+        </div>
+        <div class="plant-meta">
+          <div class="title">${this._escape(name)}</div>
+          <div class="subtitle">${this._escape(item.category || "Custom plant")}</div>
+        </div>
+        <div class="plant-stats">
+          <div class="label">Moisture</div>
+          <div class="value">${this._escape(item.moisture_min ?? 20)}-${this._escape(item.moisture_max ?? 60)}%</div>
+        </div>
+      </div>
+    `;
+  }
+
   _plantWizardDetailsStep() {
     const item = this._plantWizardSelected || {};
     const name = item.display_name || item.name || this._plantWizardName || "Unknown plant";
+    const imageUrl = this._plantWizardPhotoUrl || item.image_url || "";
+    if (this._plantWizardCustom) {
+      return `
+        <div class="profile-panel">
+          <div class="profile-hero">
+            <div class="profile-photo">
+              ${imageUrl ? `<img src="${this._escape(imageUrl)}" alt="">` : '<ha-icon icon="mdi:flower"></ha-icon>'}
+            </div>
+            <div>
+              <div class="title">${this._escape(name)}</div>
+              <div class="subtitle">${this._escape(this._plantWizardCategory || item.category || "Custom plant")}</div>
+            </div>
+          </div>
+          <div class="grid">
+            <label class="field">
+              <div class="label">Plant name</div>
+              <input data-action="plant-wizard-name" value="${this._escape(this._plantWizardName || name)}" maxlength="64">
+            </label>
+            <label class="field">
+              <div class="label">Category</div>
+              <input data-action="plant-wizard-category" value="${this._escape(this._plantWizardCategory || item.category || "")}" maxlength="128">
+            </label>
+            <label class="field wide">
+              <div class="label">Photo</div>
+              <input type="file" accept="image/jpeg,image/png,image/webp" data-action="plant-wizard-photo-file">
+              <div class="label">${this._plantWizardPhotoUploading ? "Uploading photo..." : this._plantWizardPhotoFileName ? `Selected: ${this._escape(this._plantWizardPhotoFileName)}` : "JPEG, PNG, or WebP up to 1 MB"}</div>
+            </label>
+            <label class="field wide">
+              <div class="label">Description</div>
+              <textarea data-action="plant-wizard-description" rows="5">${this._escape(this._plantWizardDescription || "")}</textarea>
+            </label>
+          </div>
+        </div>
+      `;
+    }
     const about = item.description || "No catalog description is available for this plant.";
     return `
       <div class="profile-panel">
@@ -4086,6 +4508,37 @@ class GrowcubeCard extends HTMLElement {
           ${this._profileStatTemplate("Temperature", this._rangeText(item.temp_min, item.temp_max, "°C"))}
           ${this._profileStatTemplate("Air humidity", this._rangeText(item.air_humidity_min, item.air_humidity_max, "%"))}
         </div>
+      </div>
+    `;
+  }
+
+  _plantWizardConditionsStep() {
+    return `
+      <div class="grid">
+        <label class="field">
+          <div class="label">Soil moisture min, %</div>
+          <input type="number" min="1" max="98" step="1" data-action="plant-wizard-smart-min" value="${this._plantWizardSmartMin}">
+        </label>
+        <label class="field">
+          <div class="label">Soil moisture max, %</div>
+          <input type="number" min="2" max="99" step="1" data-action="plant-wizard-smart-max" value="${this._plantWizardSmartMax}">
+        </label>
+        <label class="field">
+          <div class="label">Temperature min, °C</div>
+          <input type="number" min="-50" max="100" step="1" data-action="plant-wizard-temp-min" value="${this._plantWizardTempMin}">
+        </label>
+        <label class="field">
+          <div class="label">Temperature max, °C</div>
+          <input type="number" min="-50" max="100" step="1" data-action="plant-wizard-temp-max" value="${this._plantWizardTempMax}">
+        </label>
+        <label class="field">
+          <div class="label">Air humidity min, %</div>
+          <input type="number" min="0" max="100" step="1" data-action="plant-wizard-air-humidity-min" value="${this._plantWizardAirHumidityMin}">
+        </label>
+        <label class="field">
+          <div class="label">Air humidity max, %</div>
+          <input type="number" min="0" max="100" step="1" data-action="plant-wizard-air-humidity-max" value="${this._plantWizardAirHumidityMax}">
+        </label>
       </div>
     `;
   }
@@ -4161,6 +4614,14 @@ class GrowcubeCard extends HTMLElement {
   }
 
   _plantWizardReviewStep() {
+    const subtitle = this._plantWizardCreateCustomOnly
+      ? (this._plantWizardCategory || "Custom plant")
+      : `${this._channelName(this._plantWizardChannel)} · ${this._plantWizardModeLabel()}`;
+    const detail = this._plantWizardCreateCustomOnly
+      ? `${this._plantWizardSmartMin}-${this._plantWizardSmartMax}% moisture`
+      : this._plantWizardMode === "Smart"
+        ? `${this._plantWizardSmartMin}-${this._plantWizardSmartMax}% moisture · daytime ${this._plantWizardDaytime ? "on" : "off"}`
+        : `${this._plantWizardAmount} mL every ${this._plantWizardIntervalDays} day${this._plantWizardIntervalDays === 1 ? "" : "s"} · starts ${this._plantWizardStartTime().slice(0, 5)}`;
     return `
       <div class="wizard-review">
         <div class="plant-photo">
@@ -4168,8 +4629,8 @@ class GrowcubeCard extends HTMLElement {
         </div>
         <div>
           <div class="title">${this._escape(this._plantWizardName || "New plant")}</div>
-          <div class="subtitle">${this._escape(this._channelName(this._plantWizardChannel))} · ${this._escape(this._plantWizardModeLabel())}</div>
-          <div class="label">${this._escape(this._plantWizardMode === "Smart" ? `${this._plantWizardSmartMin}-${this._plantWizardSmartMax}% moisture · daytime ${this._plantWizardDaytime ? "on" : "off"}` : `${this._plantWizardAmount} mL every ${this._plantWizardIntervalDays} day${this._plantWizardIntervalDays === 1 ? "" : "s"} · starts ${this._plantWizardStartTime().slice(0, 5)}`)}</div>
+          <div class="subtitle">${this._escape(subtitle)}</div>
+          <div class="label">${this._escape(detail)}</div>
         </div>
       </div>
     `;
@@ -4222,10 +4683,29 @@ class GrowcubeCard extends HTMLElement {
     return this._plantWizardMode === "Repeating" ? "Timed watering" : "Smart watering";
   }
 
-  async _saveScheduleAfterEdit(message) {
+  async _saveScheduleAfterEdit(message, values = {}) {
+    const hasDirectValues = Object.keys(values).length > 0;
+    let apiError = null;
+    if (hasDirectValues) {
+      try {
+        const result = await this._configureChannelApi(this._channelKey(), values, true);
+        if (result) {
+          this._showToast(message);
+          return;
+        }
+      } catch (error) {
+        apiError = error;
+        console.warn("[GrowCube] channel config API failed, trying entity fallback", {
+          channel: this._channelKey(),
+          error: error?.message || String(error),
+        });
+      }
+    }
     const save = this._entities().save;
     if (save) {
       await this._press(save);
+    } else if (hasDirectValues && apiError) {
+      throw apiError;
     }
     this._showToast(message);
   }
@@ -4375,6 +4855,18 @@ class GrowcubeCard extends HTMLElement {
     return this.shadowRoot.querySelector(`[data-edit-field="${field}"]`)?.value;
   }
 
+  _currentTimedWateringValues(entities, overrides = {}) {
+    const [hour, minute] = this._splitTime(this._entityState(entities.first_watering_time, ""));
+    const firstTime = `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}:00`;
+    return {
+      mode: "Repeating",
+      first_watering_time: firstTime,
+      amount_ml: this._clamp(this._number(entities.duration, 50), 10, 500),
+      interval_hours: this._clamp(this._number(entities.interval, 24), 1, 240),
+      ...overrides,
+    };
+  }
+
   _deletePlantDialogTemplate() {
     const plantName = this._plantName();
     return `
@@ -4411,28 +4903,16 @@ class GrowcubeCard extends HTMLElement {
   }
 
   async _confirmModeWizard() {
-    const entities = this._entities();
     try {
-      if (!entities.mode) {
-        throw new Error("Mode entity is unavailable");
-      }
-      await this._setSelect(entities.mode, this._normalizeMode(this._modeWizardMode));
-      if (this._modeWizardMode === "Smart") {
-        if (!entities.smart_min_moisture || !entities.smart_max_moisture || !entities.smart_daytime_watering) {
-          throw new Error("Smart watering entities are unavailable");
-        }
-        await this._setNumber(entities.smart_min_moisture, this._modeWizardSmartMin);
-        await this._setNumber(entities.smart_max_moisture, this._modeWizardSmartMax);
-        await this._setSwitch(entities.smart_daytime_watering, this._modeWizardDaytime);
-      } else if (this._modeWizardMode === "Repeating") {
-        if (!entities.first_watering_time || !entities.duration || !entities.interval) {
-          throw new Error("Timed watering entities are unavailable");
-        }
-        await this._setTime(entities.first_watering_time, this._modeWizardStartTime());
-        await this._setNumber(entities.duration, this._modeWizardAmount);
-        await this._setNumber(entities.interval, this._modeWizardIntervalDays * 24);
-      }
-      await this._saveScheduleAfterEdit("Watering settings updated");
+      await this._saveScheduleAfterEdit("Watering settings updated", {
+        mode: this._normalizeMode(this._modeWizardMode),
+        first_watering_time: this._modeWizardStartTime(),
+        amount_ml: this._modeWizardAmount,
+        interval_hours: this._modeWizardIntervalDays * 24,
+        smart_min_moisture: this._modeWizardSmartMin,
+        smart_max_moisture: this._modeWizardSmartMax,
+        smart_daytime_watering: this._modeWizardDaytime,
+      });
       this._modeWizardOpen = false;
       this._render();
     } catch (error) {
@@ -4445,32 +4925,23 @@ class GrowcubeCard extends HTMLElement {
     const entities = this._entities();
     try {
       if (kind === "mode") {
-        if (!entities.mode) {
-          throw new Error("Mode entity is unavailable");
-        }
         const modeValue = this._normalizeMode(this._editValue("mode"));
-        await this._setSelect(entities.mode, modeValue);
-        if (modeValue === "Smart") {
-          if (!entities.smart_min_moisture || !entities.smart_max_moisture || !entities.smart_daytime_watering) {
-            throw new Error("Smart watering entities are unavailable");
-          }
-          const min = this._clamp(Number(this._editValue("smart_min")), 1, 98);
-          const max = this._clamp(Number(this._editValue("smart_max")), min + 1, 99);
-          await this._setNumber(entities.smart_min_moisture, min);
-          await this._setNumber(entities.smart_max_moisture, max);
-          await this._setSwitch(entities.smart_daytime_watering, this._editValue("daytime") === "on");
-        } else if (modeValue === "Repeating") {
-          if (!entities.first_watering_time || !entities.duration || !entities.interval) {
-            throw new Error("Timed watering entities are unavailable");
-          }
-          const [hour, minute] = this._splitTime(this._editValue("first_time"));
-          const amount = this._clamp(Number(this._editValue("schedule_amount")), 10, 500);
-          const intervalHours = this._clamp(Number(this._editValue("schedule_days")), 1, 10) * 24;
-          await this._setTime(entities.first_watering_time, `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}:00`);
-          await this._setNumber(entities.duration, amount);
-          await this._setNumber(entities.interval, intervalHours);
-        }
-        await this._saveScheduleAfterEdit("Watering settings updated");
+        const smartMin = this._clamp(Number(this._editValue("smart_min")), 1, 98);
+        const smartMax = this._clamp(Number(this._editValue("smart_max")), smartMin + 1, 99);
+        const smartDaytime = this._editValue("daytime") === "on";
+        const [firstHour, firstMinute] = this._splitTime(this._editValue("first_time"));
+        const firstTime = `${String(firstHour).padStart(2, "0")}:${String(firstMinute).padStart(2, "0")}:00`;
+        const amount = this._clamp(Number(this._editValue("schedule_amount")), 10, 500);
+        const intervalHours = this._clamp(Number(this._editValue("schedule_days")), 1, 10) * 24;
+        await this._saveScheduleAfterEdit("Watering settings updated", {
+          mode: modeValue,
+          smart_min_moisture: smartMin,
+          smart_max_moisture: smartMax,
+          smart_daytime_watering: smartDaytime,
+          first_watering_time: firstTime,
+          amount_ml: amount,
+          interval_hours: intervalHours,
+        });
       } else if (kind === "plantName") {
         if (!entities.name) {
           throw new Error("Plant name entity is unavailable");
@@ -4488,36 +4959,34 @@ class GrowcubeCard extends HTMLElement {
         await this._setNumber(entities.manual_duration, this._clamp(Number(this._editValue("manual_amount")), 30, 150));
         this._showToast("Manual amount updated");
       } else if (kind === "smartRange") {
-        if (!entities.smart_min_moisture || !entities.smart_max_moisture) {
-          throw new Error("Moisture range entities are unavailable");
-        }
         const min = this._clamp(Number(this._editValue("smart_min")), 1, 98);
         const max = this._clamp(Number(this._editValue("smart_max")), min + 1, 99);
-        await this._setNumber(entities.smart_min_moisture, min);
-        await this._setNumber(entities.smart_max_moisture, max);
-        await this._saveScheduleAfterEdit("Moisture range updated");
+        await this._saveScheduleAfterEdit("Moisture range updated", {
+          smart_min_moisture: min,
+          smart_max_moisture: max,
+        });
       } else if (kind === "daytime") {
-        if (!entities.smart_daytime_watering) {
-          throw new Error("Daytime watering entity is unavailable");
-        }
-        await this._setSwitch(entities.smart_daytime_watering, this._editValue("daytime") === "on");
-        await this._saveScheduleAfterEdit("Daytime watering updated");
+        await this._saveScheduleAfterEdit("Daytime watering updated", {
+          smart_daytime_watering: this._editValue("daytime") === "on",
+        });
       } else if (kind === "firstWatering") {
         if (!entities.first_watering_time) {
           throw new Error("First watering entity is unavailable");
         }
         const [hour, minute] = this._splitTime(this._editValue("first_time"));
-        await this._setTime(entities.first_watering_time, `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}:00`);
-        await this._saveScheduleAfterEdit("First watering updated");
+        const firstTime = `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}:00`;
+        await this._saveScheduleAfterEdit("First watering updated", {
+          ...this._currentTimedWateringValues(entities),
+          first_watering_time: firstTime,
+        });
       } else if (kind === "schedule") {
-        if (!entities.duration || !entities.interval) {
-          throw new Error("Schedule entities are unavailable");
-        }
         const amount = this._clamp(Number(this._editValue("schedule_amount")), 10, 500);
         const intervalHours = this._clamp(Number(this._editValue("schedule_days")), 1, 10) * 24;
-        await this._setNumber(entities.duration, amount);
-        await this._setNumber(entities.interval, intervalHours);
-        await this._saveScheduleAfterEdit("Schedule updated");
+        await this._saveScheduleAfterEdit("Schedule updated", {
+          ...this._currentTimedWateringValues(entities),
+          amount_ml: amount,
+          interval_hours: intervalHours,
+        });
       }
       this._editDialog = null;
       this._render();
@@ -4647,6 +5116,21 @@ class GrowcubeCard extends HTMLElement {
         } else if (action === "search-plant-catalog") {
           event.stopPropagation();
           this._searchPlantCatalog();
+        } else if (action === "open-custom-plants") {
+          event.stopPropagation();
+          this._openCustomPlantsDialog();
+        } else if (action === "plant-wizard-custom") {
+          event.stopPropagation();
+          this._startCustomPlantWizard();
+        } else if (action === "select-custom-plant") {
+          event.stopPropagation();
+          this._selectCustomPlantProfile(element.dataset.index);
+        } else if (action === "custom-plants-prev") {
+          event.stopPropagation();
+          this._changeCustomPlantPage(-1);
+        } else if (action === "custom-plants-next") {
+          event.stopPropagation();
+          this._changeCustomPlantPage(1);
         } else if (action === "select-catalog-plant") {
           event.stopPropagation();
           this._selectPlantCatalogItem(element.dataset.index);
@@ -4762,8 +5246,10 @@ class GrowcubeCard extends HTMLElement {
           this._openPlantWizard();
         } else if (action === "toggle-smart-daytime") {
           event.stopPropagation();
-          this._toggleSwitch(this._entities().smart_daytime_watering)
-            .then(() => this._saveScheduleAfterEdit("Daytime watering updated"))
+          const current = this._isOn(this._entities().smart_daytime_watering);
+          this._saveScheduleAfterEdit("Daytime watering updated", {
+            smart_daytime_watering: !current,
+          })
             .catch((error) => this._showError(error?.message || "Could not update daytime watering"));
         } else if (action === "reset" || action === "delete-plant") {
           event.stopPropagation();
@@ -4807,6 +5293,10 @@ class GrowcubeCard extends HTMLElement {
           this._closePlantWizard();
         } else if (action === "close-plant-wizard-button") {
           this._closePlantWizard();
+        } else if (action === "close-custom-plants" && event.target === element) {
+          this._closeCustomPlantsDialog();
+        } else if (action === "close-custom-plants-button") {
+          this._closeCustomPlantsDialog();
         } else if (action === "confirm-add-plant") {
           this._confirmAddPlant();
         } else if (action === "close-mode-wizard" && event.target === element) {
@@ -4861,6 +5351,22 @@ class GrowcubeCard extends HTMLElement {
       wizardName.addEventListener("click", (event) => event.stopPropagation());
     }
 
+    const wizardCategory = this.shadowRoot.querySelector('[data-action="plant-wizard-category"]');
+    if (wizardCategory) {
+      wizardCategory.addEventListener("input", (event) => {
+        this._plantWizardCategory = event.target.value;
+      });
+      wizardCategory.addEventListener("click", (event) => event.stopPropagation());
+    }
+
+    const wizardDescription = this.shadowRoot.querySelector('[data-action="plant-wizard-description"]');
+    if (wizardDescription) {
+      wizardDescription.addEventListener("input", (event) => {
+        this._plantWizardDescription = event.target.value;
+      });
+      wizardDescription.addEventListener("click", (event) => event.stopPropagation());
+    }
+
     const wizardSearch = this.shadowRoot.querySelector('[data-action="plant-wizard-search"]');
     if (wizardSearch) {
       wizardSearch.addEventListener("input", (event) => {
@@ -4881,6 +5387,14 @@ class GrowcubeCard extends HTMLElement {
         this._plantWizardPhotoUrl = event.target.value;
       });
       wizardPhotoUrl.addEventListener("click", (event) => event.stopPropagation());
+    }
+
+    const wizardPhotoFile = this.shadowRoot.querySelector('[data-action="plant-wizard-photo-file"]');
+    if (wizardPhotoFile) {
+      wizardPhotoFile.addEventListener("change", (event) => {
+        this._uploadPlantWizardPhoto(event.target.files?.[0]);
+      });
+      wizardPhotoFile.addEventListener("click", (event) => event.stopPropagation());
     }
 
     const wizardChannel = this.shadowRoot.querySelector('[data-action="plant-wizard-channel"]');
@@ -4956,6 +5470,38 @@ class GrowcubeCard extends HTMLElement {
         this._plantWizardSmartMax = this._clamp(Number(event.target.value), Math.min(99, this._plantWizardSmartMin + 1), 99);
       });
       wizardSmartMax.addEventListener("click", (event) => event.stopPropagation());
+    }
+
+    const wizardTempMin = this.shadowRoot.querySelector('[data-action="plant-wizard-temp-min"]');
+    if (wizardTempMin) {
+      wizardTempMin.addEventListener("input", (event) => {
+        this._plantWizardTempMin = this._clamp(Number(event.target.value), -50, Math.max(-50, this._plantWizardTempMax - 1));
+      });
+      wizardTempMin.addEventListener("click", (event) => event.stopPropagation());
+    }
+
+    const wizardTempMax = this.shadowRoot.querySelector('[data-action="plant-wizard-temp-max"]');
+    if (wizardTempMax) {
+      wizardTempMax.addEventListener("input", (event) => {
+        this._plantWizardTempMax = this._clamp(Number(event.target.value), Math.min(100, this._plantWizardTempMin + 1), 100);
+      });
+      wizardTempMax.addEventListener("click", (event) => event.stopPropagation());
+    }
+
+    const wizardAirHumidityMin = this.shadowRoot.querySelector('[data-action="plant-wizard-air-humidity-min"]');
+    if (wizardAirHumidityMin) {
+      wizardAirHumidityMin.addEventListener("input", (event) => {
+        this._plantWizardAirHumidityMin = this._clamp(Number(event.target.value), 0, Math.max(0, this._plantWizardAirHumidityMax - 1));
+      });
+      wizardAirHumidityMin.addEventListener("click", (event) => event.stopPropagation());
+    }
+
+    const wizardAirHumidityMax = this.shadowRoot.querySelector('[data-action="plant-wizard-air-humidity-max"]');
+    if (wizardAirHumidityMax) {
+      wizardAirHumidityMax.addEventListener("input", (event) => {
+        this._plantWizardAirHumidityMax = this._clamp(Number(event.target.value), Math.min(100, this._plantWizardAirHumidityMin + 1), 100);
+      });
+      wizardAirHumidityMax.addEventListener("click", (event) => event.stopPropagation());
     }
 
     const modeWizardAmount = this.shadowRoot.querySelector('[data-action="mode-wizard-amount"]');

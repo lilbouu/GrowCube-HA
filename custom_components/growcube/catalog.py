@@ -29,6 +29,23 @@ async def async_search_plants(hass: HomeAssistant, query: str) -> list[dict[str,
     return [_plant_from_api(plant) for plant in plants[:CATALOG_LIMIT] if isinstance(plant, dict)]
 
 
+async def async_get_plant_by_id(hass: HomeAssistant, plant_id: int) -> dict[str, Any] | None:
+    """Fetch one GrowCube plant profile by catalog id."""
+
+    if plant_id <= 0:
+        return None
+
+    data = await _async_fetch_catalog(hass, f"/api/en/plants/id/{plant_id}")
+    plants = data.get("plants")
+    if not isinstance(plants, list):
+        return None
+
+    for plant in plants:
+        if isinstance(plant, dict) and _as_int(plant.get("id")) == plant_id:
+            return _plant_from_api(plant)
+    return None
+
+
 async def _async_fetch_catalog(hass: HomeAssistant, path: str) -> dict[str, Any]:
     session = aiohttp_client.async_get_clientsession(hass)
     last_error: Exception | None = None

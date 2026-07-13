@@ -1,6 +1,6 @@
 import asyncio
 from datetime import datetime, time, timedelta, timezone
-from typing import Any, Optional, List, Tuple, Callable
+from typing import Any, Optional, List, Tuple, Callable, Mapping
 from dataclasses import asdict, replace
 
 from .client import GrowcubeClient, GrowcubeReport, Channel
@@ -19,6 +19,7 @@ from .client import (
     WateringExceptionLockedGrowcubeReport,
     MoistureHistoryGrowcubeReport,
     WateringRecordGrowcubeReport,
+    ExtendedWateringRecordGrowcubeReport,
     HistoryCompleteGrowcubeReport,
     TankStateGrowcubeReport,
     TankForecastGrowcubeReport,
@@ -30,12 +31,14 @@ from .client import (
     PlantEndCommand,
     ClosePumpCommand,
     RequestHistoryCommand,
+    RequestExtendedWateringHistoryCommand,
     RequestTankLevelCommand,
     RequestTankForecastCommand,
     RequestDelayedTimedWateringStateCommand,
     SetTankLevelCommand,
 )
-from .protocol import scheduled_watering_payload
+from .catalog import async_get_plant_by_id
+from .protocol import scheduled_watering_payload, watering_mode_payload
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.components import persistent_notification
 from homeassistant.core import HomeAssistant
@@ -93,10 +96,10 @@ from dataclasses import dataclass, field
 class DelayedTimedWateringCommand(GrowcubeCommand):
     """Command 51 - schedule timed watering from a specific start epoch."""
 
-    def __init__(self, channel: Channel, duration: int, interval: int, start_time: datetime):
+    def __init__(self, channel: Channel, duration: int, interval: int, start_time: datetime, plant_id: int = 0):
         super().__init__(
             self.CMD_DELAYED_WATERING,
-            scheduled_watering_payload(channel.value, duration, interval, start_time),
+            scheduled_watering_payload(channel.value, duration, interval, start_time, plant_id),
         )
 
     def get_description(self) -> str:
@@ -113,11 +116,24 @@ class DisableAutoWateringCommand(GrowcubeCommand):
         return f"DisableAutoWateringCommand: {self.message}"
 
 
+class ResetWateringModeCommand(GrowcubeCommand):
+    """Command 49 mode 0 - clear watering mode for a channel."""
+
+    def __init__(self, channel: Channel, plant_id: int = 0):
+        super().__init__(GrowcubeCommand.CMD_WATER_MODE, watering_mode_payload(channel.value, 0, 0, 0, plant_id))
+
+    def get_description(self) -> str:
+        return f"ResetWateringModeCommand: {self.message}"
+
+
 class TimedWateringModeCommand(GrowcubeCommand):
     """Command 49 mode 1 - repeating timed watering."""
 
-    def __init__(self, channel: Channel, duration: int, interval: int):
-        super().__init__(GrowcubeCommand.CMD_WATER_MODE, f"{channel.value}@1@{duration}@{interval}")
+    def __init__(self, channel: Channel, duration: int, interval: int, plant_id: int = 0):
+        super().__init__(
+            GrowcubeCommand.CMD_WATER_MODE,
+            watering_mode_payload(channel.value, 1, duration, interval, plant_id),
+        )
 
     def get_description(self) -> str:
         return f"TimedWateringModeCommand: {self.message}"
@@ -126,11 +142,18 @@ class TimedWateringModeCommand(GrowcubeCommand):
 class SmartWateringModeCommand(GrowcubeCommand):
     """Command 49 mode 2/3 - smart watering by moisture range."""
 
-    def __init__(self, channel: Channel, daytime_watering: bool, min_moisture: int, max_moisture: int):
+    def __init__(
+        self,
+        channel: Channel,
+        daytime_watering: bool,
+        min_moisture: int,
+        max_moisture: int,
+        plant_id: int = 0,
+    ):
         mode = 3 if daytime_watering else 2
         super().__init__(
             GrowcubeCommand.CMD_WATER_MODE,
-            f"{channel.value}@{mode}@{min_moisture}@{max_moisture}",
+            watering_mode_payload(channel.value, mode, min_moisture, max_moisture, plant_id),
         )
 
     def get_description(self) -> str:
@@ -548,6 +571,7 @@ class GrowcubeDataCoordinator(DataUpdateCoordinator[GrowcubeData]):
                     channel=channel,
                     timestamp=timestamp,
                     amount_ml=pending_amount,
+                    source="manual",
                 )
                 events = list(channel_state.watering_events)
                 if all(abs((existing.timestamp - event.timestamp).total_seconds()) > 30 for existing in events):
@@ -735,6 +759,34 @@ class GrowcubeDataCoordinator(DataUpdateCoordinator[GrowcubeData]):
                     watering_events=events,
                 )
                 watering_state_changed = True
+        # 56 - extended watering record with source
+        elif isinstance(report, ExtendedWateringRecordGrowcubeReport):
+            timestamp = report.timestamp.replace(tzinfo=dt_util.DEFAULT_TIME_ZONE)
+            event = GrowcubeWateringEvent(
+                channel=report.channel.value,
+                timestamp=timestamp,
+                source=report.source,
+            )
+            channel_state = new.channels[report.channel.value]
+            events = list(channel_state.watering_events)
+            for index, existing in enumerate(events):
+                if abs((existing.timestamp - event.timestamp).total_seconds()) <= 30:
+                    events[index] = replace(
+                        existing,
+                        source=report.source,
+                        amount_ml=existing.amount_ml,
+                    )
+                    break
+            else:
+                events.append(event)
+            events.sort(key=lambda item: item.timestamp)
+            new = self._set_channel_state(
+                new,
+                report.channel.value,
+                last_watering=timestamp,
+                watering_events=events[-MAX_STORED_WATERING_EVENTS:],
+            )
+            watering_state_changed = True
         # 35/36 - history end marker
         elif isinstance(report, HistoryCompleteGrowcubeReport):
             channel_state = new.channels[report.channel.value]
@@ -809,11 +861,31 @@ class GrowcubeDataCoordinator(DataUpdateCoordinator[GrowcubeData]):
             channel_index = report.channel.value
             channel_state = new.channels[channel_index]
             config = channel_state.config
-            if report.enabled:
+            restore_plant_id = 0
+            restore_force = False
+            if report.has_plant_id:
+                restore_plant_id = report.plant_id
+                restore_force = config.plant_id != report.plant_id
+                config = replace(config, plant_id=report.plant_id)
+                channel_state = replace(channel_state, config=config)
+            plant_removed = report.has_plant_id and report.plant_id == 0 and report.mode == WateringMode.DISABLED
+            if plant_removed:
+                channels = list(new.channels)
+                channels[channel_index] = GrowcubeChannelState()
+                new = replace(new, channels=channels)
+                channel_config_changed = True
+                self._history_loading_since[channel_index] = None
+                self._timed_history_refresh_requested_at[channel_index] = None
+                self._history_gap_retry_at[channel_index] = None
+                self._recent_manual_watering_at[channel_index] = None
+                self._pending_manual_watering_amount[channel_index] = None
+                self._dismiss_watering_issue_notifications(channel_index)
+            elif report.mode == WateringMode.REPEATING and report.enabled:
                 anchor = self._datetime_from_growcube_local_epoch(report.next_start_epoch)
                 if anchor is not None and report.duration_seconds > 0 and report.interval_hours > 0:
                     new_config = replace(
                         config,
+                        configured=True,
                         mode=WateringMode.REPEATING,
                         amount_ml=self._stable_watering_amount_ml(
                             report.duration_seconds,
@@ -828,7 +900,38 @@ class GrowcubeDataCoordinator(DataUpdateCoordinator[GrowcubeData]):
                     channels[channel_index] = replace(channel_state, config=new_config)
                     new = replace(new, channels=channels)
                     channel_config_changed = True
-            elif config.mode == WateringMode.REPEATING or config.timed_watering_anchor is not None:
+            elif (
+                report.mode in (2, 3)
+                and 0 < report.smart_min_moisture < report.smart_max_moisture <= 100
+            ):
+                new_config = replace(
+                    config,
+                    configured=True,
+                    mode=WateringMode.SMART,
+                    smart_min_moisture=report.smart_min_moisture,
+                    smart_max_moisture=report.smart_max_moisture,
+                    smart_daytime_watering=report.mode == 3,
+                    timed_watering_anchor=None,
+                )
+                channels = list(new.channels)
+                channels[channel_index] = replace(channel_state, config=new_config)
+                new = replace(new, channels=channels)
+                channel_config_changed = True
+            elif report.has_plant_id and report.plant_id > 0:
+                new_config = replace(
+                    config,
+                    configured=True,
+                    mode=WateringMode.DISABLED,
+                    timed_watering_anchor=None,
+                )
+                channels = list(new.channels)
+                channels[channel_index] = replace(channel_state, config=new_config)
+                new = replace(new, channels=channels)
+                channel_config_changed = True
+            elif (
+                config.mode in (WateringMode.REPEATING, WateringMode.SMART)
+                or config.timed_watering_anchor is not None
+            ):
                 new_config = replace(
                     config,
                     mode=WateringMode.DISABLED,
@@ -838,6 +941,14 @@ class GrowcubeDataCoordinator(DataUpdateCoordinator[GrowcubeData]):
                 channels[channel_index] = replace(channel_state, config=new_config)
                 new = replace(new, channels=channels)
                 channel_config_changed = True
+            if restore_plant_id > 0:
+                self.hass.async_create_task(
+                    self._async_restore_channel_plant_profile(
+                        channel_index,
+                        restore_plant_id,
+                        force=restore_force,
+                    )
+                )
 
         if new is not self.data:
             self.data = new
@@ -889,8 +1000,9 @@ class GrowcubeDataCoordinator(DataUpdateCoordinator[GrowcubeData]):
             manual_duration_seconds=duration,
         )
 
-        command = TimedWateringModeCommand(channel, duration, interval)
-        self.client.send_command(command)
+        plant_id = self.data.channels[channel.value].config.plant_id
+        self.client.send_command(ResetWateringModeCommand(channel, plant_id))
+        self.client.send_command(TimedWateringModeCommand(channel, duration, interval, plant_id))
 
     async def handle_set_scheduled_watering(
         self,
@@ -941,8 +1053,10 @@ class GrowcubeDataCoordinator(DataUpdateCoordinator[GrowcubeData]):
     ) -> None:
         changes: dict[str, Any] = {"configured": True}
         if profile:
+            plant_id = self._option_int(profile.get("id"), 0)
             changes.update(
                 {
+                    "plant_id": max(0, plant_id),
                     "photo_url": str(profile.get("image_url") or ""),
                     "type_category": str(profile.get("category") or ""),
                     "type_description": str(profile.get("description") or ""),
@@ -972,6 +1086,34 @@ class GrowcubeDataCoordinator(DataUpdateCoordinator[GrowcubeData]):
             changes["plant_name"] = f"Channel {chr(ord('A') + channel)}"
         if mode is not None:
             changes["mode"] = mode
+        self._update_channel_config(channel, **changes)
+
+    async def _async_restore_channel_plant_profile(
+        self,
+        channel: int,
+        plant_id: int,
+        *,
+        force: bool = False,
+    ) -> None:
+        plant = await async_get_plant_by_id(self.hass, plant_id)
+        if not plant:
+            _LOGGER.warning(
+                "%s: Could not restore GrowCube plant profile id=%s channel=%s",
+                self.data.device_id,
+                plant_id,
+                channel,
+            )
+            return
+
+        current = self.data.channels[channel].config
+        if current.plant_id != plant_id:
+            return
+
+        changes = self._catalog_profile_changes(current, plant, force=force)
+        if not changes:
+            return
+
+        changes["configured"] = True
         self._update_channel_config(channel, **changes)
 
     async def async_set_first_watering_time(self, channel: int, value: time) -> None:
@@ -1031,6 +1173,87 @@ class GrowcubeDataCoordinator(DataUpdateCoordinator[GrowcubeData]):
         self._update_channel_config(channel, smart_daytime_watering=bool(value))
         self._schedule_apply_watering(channel)
 
+    async def async_configure_channel(
+        self,
+        channel: int,
+        values: Mapping[str, Any],
+        apply: bool = True,
+    ) -> None:
+        if channel < 0 or channel >= len(self.data.channels):
+            raise HomeAssistantError(f"Invalid channel '{channel}' specified")
+
+        current_config = self.data.channels[channel].config
+        changes: dict[str, Any] = {}
+
+        if "plant_id" in values:
+            changes["plant_id"] = max(0, self._option_int(values.get("plant_id"), current_config.plant_id))
+        if "plant_name" in values:
+            changes["plant_name"] = str(values.get("plant_name") or "").strip()
+        if "photo_url" in values:
+            changes["photo_url"] = str(values.get("photo_url") or "").strip()
+        for key in ("type_category", "type_description"):
+            if key in values:
+                changes[key] = str(values.get(key) or "").strip()
+        for key in ("temp_min", "temp_max", "air_humidity_min", "air_humidity_max"):
+            if key in values:
+                changes[key] = self._option_int(values.get(key), getattr(current_config, key))
+
+        if "mode" in values:
+            changes["mode"] = self._watering_mode_from_value(values.get("mode"))
+
+        if "first_watering_time" in values:
+            changes["first_watering_time"] = self._time_from_value(values.get("first_watering_time"))
+            changes["timed_watering_anchor"] = None
+
+        if "amount_ml" in values:
+            amount_ml = self._watering_amount_clamp_round(self._option_int(values.get("amount_ml"), current_config.amount_ml))
+            changes["amount_ml"] = amount_ml
+            changes["duration_seconds"] = self._watering_duration_seconds(amount_ml)
+            changes["timed_watering_anchor"] = None
+        elif "duration_seconds" in values:
+            duration = self._clamp_int(values.get("duration_seconds"), 1, 60)
+            changes["duration_seconds"] = duration
+            changes["amount_ml"] = self._watering_amount_clamp_round(self._watering_amount_ml(duration))
+            changes["timed_watering_anchor"] = None
+
+        if "interval_hours" in values:
+            changes["interval_hours"] = self._clamp_int(values.get("interval_hours"), 1, 240)
+            changes["timed_watering_anchor"] = None
+
+        min_source = values.get("smart_min_moisture", current_config.smart_min_moisture)
+        max_source = values.get("smart_max_moisture", current_config.smart_max_moisture)
+        if "smart_min_moisture" in values or "smart_max_moisture" in values:
+            smart_min = self._smart_min_moisture_clamp(
+                self._option_int(min_source, current_config.smart_min_moisture),
+                self._option_int(max_source, current_config.smart_max_moisture),
+            )
+            smart_max = self._smart_max_moisture_clamp(
+                self._option_int(max_source, current_config.smart_max_moisture),
+                smart_min,
+            )
+            changes["smart_min_moisture"] = smart_min
+            changes["smart_max_moisture"] = smart_max
+
+        if "smart_daytime_watering" in values:
+            changes["smart_daytime_watering"] = self._option_bool(
+                values.get("smart_daytime_watering"),
+                current_config.smart_daytime_watering,
+            )
+
+        if "configured" in values:
+            changes["configured"] = self._option_bool(values.get("configured"), current_config.configured)
+        elif (
+            changes.get("plant_name")
+            or changes.get("photo_url")
+            or changes.get("mode", current_config.mode) != WateringMode.DISABLED
+        ):
+            changes["configured"] = True
+
+        self._update_channel_config(channel, **changes)
+        if apply:
+            self._cancel_pending_apply(channel)
+            await self.apply_watering_settings(channel)
+
     async def async_reset_plant(self, channel: int) -> None:
         await self.async_end_plant(channel)
         self._update_channel_config(channel, **asdict(GrowcubeChannelConfig()))
@@ -1056,6 +1279,7 @@ class GrowcubeDataCoordinator(DataUpdateCoordinator[GrowcubeData]):
         self._history_loading_since[channel] = now
         self.async_set_updated_data(self.data)
         self.client.send_command(RequestHistoryCommand(Channel(channel)))
+        self.client.send_command(RequestExtendedWateringHistoryCommand(Channel(channel)))
 
     async def _async_history_retry_tick(self, now: datetime) -> None:
         if self.shutting_down or not self.data.connected:
@@ -1260,8 +1484,10 @@ class GrowcubeDataCoordinator(DataUpdateCoordinator[GrowcubeData]):
             timed_watering_anchor=None,
         )
         self._clear_watering_issue_state(channel)
+        plant_id = self.data.channels[channel].config.plant_id
+        self.client.send_command(ResetWateringModeCommand(Channel(channel), plant_id))
         self.client.send_command(
-            SmartWateringModeCommand(Channel(channel), daytime_watering, min_moisture, max_moisture)
+            SmartWateringModeCommand(Channel(channel), daytime_watering, min_moisture, max_moisture, plant_id)
         )
 
     async def apply_watering_settings(self, channel: int) -> None:
@@ -1314,13 +1540,16 @@ class GrowcubeDataCoordinator(DataUpdateCoordinator[GrowcubeData]):
         self._clear_watering_issue_state(channel.value)
 
     def _send_disable_watering_commands(self, channel: Channel) -> None:
+        plant_id = self.data.channels[channel.value].config.plant_id
         self.client.send_command(ClosePumpCommand(channel))
         self.client.send_command(DisableAutoWateringCommand(channel))
+        self.client.send_command(ResetWateringModeCommand(channel, plant_id))
 
     def _send_end_plant_commands(self, channel: Channel) -> None:
         self.client.send_command(ClosePumpCommand(channel))
         self.client.send_command(PlantEndCommand(channel))
         self.client.send_command(DisableAutoWateringCommand(channel))
+        self.client.send_command(ResetWateringModeCommand(channel, 0))
 
     def _ensure_channel_configured(self, channel: int) -> None:
         if not self.data.channels[channel].config.configured:
@@ -1388,11 +1617,11 @@ class GrowcubeDataCoordinator(DataUpdateCoordinator[GrowcubeData]):
         interval: int,
         start_time: datetime | None,
     ) -> None:
-        if start_time is None:
-            command = TimedWateringModeCommand(channel, duration, interval)
-        else:
-            command = DelayedTimedWateringCommand(channel, duration, interval, start_time)
-        self.client.send_command(command)
+        plant_id = self.data.channels[channel.value].config.plant_id
+        self.client.send_command(ResetWateringModeCommand(channel, plant_id))
+        self.client.send_command(TimedWateringModeCommand(channel, duration, interval, plant_id))
+        if start_time is not None:
+            self.client.send_command(DelayedTimedWateringCommand(channel, duration, interval, start_time, plant_id))
 
     def _restore_channel_config(self) -> None:
         """Restore HA-side channel settings from the config entry options."""
@@ -1485,6 +1714,7 @@ class GrowcubeDataCoordinator(DataUpdateCoordinator[GrowcubeData]):
                             channel=idx,
                             timestamp=timestamp,
                             amount_ml=amount_value,
+                            source=str(item.get("source") or "last"),
                         )
                     )
 
@@ -1517,6 +1747,7 @@ class GrowcubeDataCoordinator(DataUpdateCoordinator[GrowcubeData]):
                 raw_config.get("configured"),
                 self._legacy_channel_configured(raw_config),
             ),
+            plant_id=max(0, self._option_int(raw_config.get("plant_id"), 0)),
             plant_name=str(raw_config.get("plant_name", "")),
             photo_url=str(raw_config.get("photo_url", "")),
             type_category=str(raw_config.get("type_category", "")),
@@ -1588,6 +1819,7 @@ class GrowcubeDataCoordinator(DataUpdateCoordinator[GrowcubeData]):
                     {
                         "timestamp": event.timestamp.isoformat(),
                         "amount_ml": event.amount_ml,
+                        "source": event.source,
                     }
                     for event in channel.watering_events[-MAX_STORED_WATERING_EVENTS:]
                 ],
@@ -1646,12 +1878,6 @@ class GrowcubeDataCoordinator(DataUpdateCoordinator[GrowcubeData]):
         forecast_usage = self._firmware_forecast_daily_usage_ml()
         if forecast_usage is not None:
             return forecast_usage
-
-        state = self.data.tank_state
-        if state.last_filled is not None and state.used_ml > 0:
-            elapsed = (dt_util.now() - state.last_filled).total_seconds()
-            if elapsed >= 86400:
-                return state.used_ml / (elapsed / 86400)
 
         usage = 0.0
         for channel_state in self.data.channels:
@@ -1764,6 +1990,62 @@ class GrowcubeDataCoordinator(DataUpdateCoordinator[GrowcubeData]):
         rounded = self._watering_amount_clamp_round(amount_ml)
         return min(WATER_MANUAL_AMOUNT_MAX_ML, max(WATER_MANUAL_AMOUNT_MIN_ML, rounded))
 
+    def _catalog_profile_changes(
+        self,
+        config: GrowcubeChannelConfig,
+        plant: dict[str, Any],
+        *,
+        force: bool = False,
+    ) -> dict[str, Any]:
+        changes: dict[str, Any] = {}
+
+        def set_text(field: str, value: Any) -> None:
+            text = str(value or "").strip()
+            if text and (force or not str(getattr(config, field) or "").strip()):
+                changes[field] = text
+
+        def set_int(field: str, value: Any, default_empty: int = 0) -> None:
+            parsed = self._option_int(value, default_empty)
+            if parsed and (force or int(getattr(config, field) or 0) == default_empty):
+                changes[field] = parsed
+
+        set_text("plant_name", plant.get("display_name") or plant.get("name"))
+        set_text("photo_url", plant.get("image_url"))
+        set_text("type_category", plant.get("category"))
+        set_text("type_description", plant.get("description"))
+        set_int("temp_min", plant.get("temp_min"))
+        set_int("temp_max", plant.get("temp_max"))
+        set_int("air_humidity_min", plant.get("air_humidity_min"))
+        set_int("air_humidity_max", plant.get("air_humidity_max"))
+
+        return changes
+
+    @staticmethod
+    def _time_from_value(value: Any) -> time | None:
+        if value in (None, ""):
+            return None
+        try:
+            return time.fromisoformat(str(value))
+        except ValueError as err:
+            raise HomeAssistantError(f"Invalid first_watering_time '{value}' specified") from err
+
+    @staticmethod
+    def _watering_mode_from_value(value: Any) -> WateringMode:
+        if isinstance(value, WateringMode):
+            return value
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in ("disabled", "off", "0"):
+                return WateringMode.DISABLED
+            if normalized in ("repeating", "timed", "scheduled", "1"):
+                return WateringMode.REPEATING
+            if normalized in ("smart", "2", "3"):
+                return WateringMode.SMART
+        try:
+            return WateringMode(int(value))
+        except (TypeError, ValueError):
+            raise HomeAssistantError(f"Invalid watering mode '{value}' specified")
+
     @staticmethod
     def _option_datetime(value: Any) -> datetime | None:
         if not isinstance(value, str) or not value:
@@ -1780,6 +2062,7 @@ class GrowcubeDataCoordinator(DataUpdateCoordinator[GrowcubeData]):
     def _channel_config_to_options(config: GrowcubeChannelConfig) -> dict[str, Any]:
         return {
             "configured": config.configured,
+            "plant_id": config.plant_id,
             "plant_name": config.plant_name,
             "photo_url": config.photo_url,
             "type_category": config.type_category,
