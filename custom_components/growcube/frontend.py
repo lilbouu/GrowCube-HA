@@ -25,7 +25,7 @@ from .api import (
 _LOGGER = logging.getLogger(__name__)
 
 CARD_URL = f"/api/{DOMAIN}/growcube-card.js"
-CARD_RESOURCE_URL = f"{CARD_URL}?v=20260713-custom-plants"
+CARD_RESOURCE_URL = f"{CARD_URL}?v=20260714-custom-plants-layout"
 CARD_PATH = Path(__file__).parent / "www" / "growcube-card.js"
 PROVISION_URL = f"/api/{DOMAIN}/provision/index.html"
 PROVISION_PATH = Path(__file__).parent / "www" / "provision"

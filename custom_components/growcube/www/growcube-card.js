@@ -2131,6 +2131,13 @@ class GrowcubeCard extends HTMLElement {
           align-items: end;
         }
 
+        .catalog-search-row {
+          display: grid;
+          grid-template-columns: minmax(0, 1fr) minmax(88px, auto) minmax(88px, auto);
+          gap: 10px;
+          align-items: center;
+        }
+
         .choice-row {
           display: grid;
           grid-template-columns: 1fr 1fr;
@@ -2766,6 +2773,28 @@ class GrowcubeCard extends HTMLElement {
           box-shadow: var(--ha-card-box-shadow, 0 12px 28px rgba(0, 0, 0, 0.3));
         }
 
+        .custom-plants-dialog {
+          width: min(640px, calc(100vw - 40px));
+        }
+
+        .custom-library-list {
+          margin-top: 14px;
+          max-height: min(52vh, 440px);
+          overflow: auto;
+        }
+
+        .custom-library-pager {
+          display: grid;
+          grid-template-columns: minmax(92px, auto) minmax(0, 1fr) minmax(92px, auto);
+          gap: 10px;
+          align-items: center;
+          margin-top: 12px;
+        }
+
+        .custom-library-pager .label {
+          text-align: center;
+        }
+
         .edit-dialog {
           width: min(420px, 100%);
         }
@@ -3054,6 +3083,7 @@ class GrowcubeCard extends HTMLElement {
           .stats,
           .overview-grid,
           .compact-row,
+          .catalog-search-row,
           .choice-row,
           .reservoir-grid,
           .channel-grid,
@@ -4367,7 +4397,7 @@ class GrowcubeCard extends HTMLElement {
     return `
       <label class="field wide">
         <div class="label">Search plant catalog</div>
-        <div class="compact-row">
+        <div class="catalog-search-row">
           <input data-action="plant-wizard-search" value="${this._escape(this._plantWizardSearch)}" placeholder="basil, monstera, tomato">
           <button type="button" data-action="search-plant-catalog">Search</button>
           <button type="button" class="secondary" data-action="open-custom-plants">Custom</button>
@@ -4401,11 +4431,11 @@ class GrowcubeCard extends HTMLElement {
     const visibleProfiles = profiles.slice(page * pageSize, page * pageSize + pageSize);
     return `
       <div class="dialog-backdrop" data-action="close-custom-plants">
-        <div class="dialog" role="dialog" aria-modal="true" aria-label="Custom plants">
+        <div class="dialog custom-plants-dialog" role="dialog" aria-modal="true" aria-label="Custom plants">
           <div class="dialog-title">Custom plants</div>
           ${
             profiles.length
-              ? `<div class="plants-list">
+              ? `<div class="plants-list custom-library-list">
                   ${visibleProfiles.map((item, index) => this._customPlantLibraryRowTemplate(item, page * pageSize + index)).join("")}
                 </div>`
               : `<div class="empty-state">
@@ -4414,7 +4444,7 @@ class GrowcubeCard extends HTMLElement {
                 </div>`
           }
           ${profiles.length > pageSize ? `
-            <div class="dialog-actions">
+            <div class="custom-library-pager">
               <button type="button" class="secondary" data-action="custom-plants-prev" ${page <= 0 ? "disabled" : ""}>Previous</button>
               <div class="label">Page ${page + 1} / ${pageCount}</div>
               <button type="button" class="secondary" data-action="custom-plants-next" ${page >= pageCount - 1 ? "disabled" : ""}>Next</button>
