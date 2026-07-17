@@ -1,4 +1,4 @@
-# GrowCube for Home Assistant  (V. 2.3.0)
+# GrowCube for Home Assistant  (V. 1.2)
 
 Home Assistant custom integration and Lovelace dashboard for Elecrow GrowCube.
 
