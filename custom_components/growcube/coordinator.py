@@ -47,6 +47,7 @@ from homeassistant.const import (
     STATE_UNAVAILABLE
 )
 import logging
+import contextlib
 
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.event import async_track_time_interval
@@ -54,6 +55,7 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.util import dt as dt_util
 
 from .const import CHANNEL_NAME, DOMAIN
+from .firmware import check_growcube_firmware_update, download_growcube_firmware_update, upload_firmware_image
 from .models import (
     GrowcubeChannelConfig,
     GrowcubeChannelState,
@@ -88,6 +90,7 @@ TIMED_HISTORY_REFRESH_RETRY = timedelta(seconds=15)
 HISTORY_TRAILING_GAP_RETRY = timedelta(hours=1)
 HISTORY_TRAILING_GAP_HOURS = 0
 MAX_STORED_WATERING_EVENTS = 64
+FIRMWARE_OTA_READY_DELAY = 20
 
 
 from dataclasses import dataclass, field
@@ -178,6 +181,12 @@ class GrowcubeData:
     device_locked: bool = False
     device_id: Optional[str] = None
     version: Optional[str] = None
+    firmware_update_status: str = "idle"
+    firmware_update_error: str = ""
+    firmware_update_started_at: str | None = None
+    firmware_update_checked_at: str | None = None
+    firmware_latest_version: str = ""
+    firmware_update_available: bool | None = None
     device_info: Optional[DeviceInfo] = None
     channels: List[GrowcubeChannelState] = field(default_factory=lambda: [GrowcubeChannelState() for _ in range(4)])
     tank_config: GrowcubeTankConfig = field(default_factory=GrowcubeTankConfig)
@@ -214,6 +223,7 @@ class GrowcubeDataCoordinator(DataUpdateCoordinator[GrowcubeData]):
         self._recent_manual_watering_at: list[datetime | None] = [None] * 4
         self._pending_manual_watering_amount: list[int | None] = [None] * 4
         self._last_alerts_signature: tuple[str, ...] = ()
+        self._firmware_check_task: asyncio.Task | None = None
         self._unsub_history_retry = async_track_time_interval(
             hass,
             self._async_history_retry_tick,
@@ -317,8 +327,9 @@ class GrowcubeDataCoordinator(DataUpdateCoordinator[GrowcubeData]):
         except (TypeError, ValueError):
             id_str = str(device_id)
         self.data.device_id = "growcube_{}".format(id_str)
+        name = str(self.entry.options.get("device_name") or "").strip() or "GrowCube " + id_str
         self.data.device_info = DeviceInfo(
-            name="GrowCube " + id_str,
+            name=name,
             identifiers={(DOMAIN, self.data.device_id)},
             manufacturer="Elecrow",
             model="Growcube",
@@ -329,14 +340,33 @@ class GrowcubeDataCoordinator(DataUpdateCoordinator[GrowcubeData]):
     def set_fallback_device_id(self) -> None:
         id_str = self.host.replace(".", "_").replace(":", "_")
         self.data.device_id = f"growcube_{id_str}"
+        name = str(self.entry.options.get("device_name") or "").strip() or f"GrowCube {self.host}"
         self.data.device_info = DeviceInfo(
-            name=f"GrowCube {self.host}",
+            name=name,
             identifiers={(DOMAIN, self.data.device_id)},
             manufacturer="Elecrow",
             model="Growcube",
             sw_version=self.data.version,
         )
         self.async_set_updated_data(self.data)
+
+    async def async_set_device_name(self, value: str) -> None:
+        """Persist a friendly GrowCube device name."""
+
+        name = str(value or "").strip()
+        if not name:
+            raise HomeAssistantError("Device name cannot be empty")
+        options = {**self.entry.options, "device_name": name}
+        self.hass.config_entries.async_update_entry(self.entry, options=options)
+        if self.data.device_id:
+            self.data.device_info = DeviceInfo(
+                name=name,
+                identifiers={(DOMAIN, self.data.device_id)},
+                manufacturer="Elecrow",
+                model="Growcube",
+                sw_version=self.data.version,
+            )
+            self.async_set_updated_data(self.data)
 
     async def connect(self) -> Tuple[bool, str]:
         result, error = await self.client.connect()
@@ -507,8 +537,11 @@ class GrowcubeDataCoordinator(DataUpdateCoordinator[GrowcubeData]):
                 report.device_id,
                 report.version
             )
+            previous_version = self.data.version
             self.data.version = report.version
             self.set_device_id(report.device_id)
+            if previous_version != report.version or self.data.firmware_update_available is None:
+                self._schedule_firmware_update_check()
             return
         # 20 - RepWaterState
         elif isinstance(report, WaterStateGrowcubeReport):
@@ -722,7 +755,7 @@ class GrowcubeDataCoordinator(DataUpdateCoordinator[GrowcubeData]):
                     existing[point.timestamp] = point
                 history = sorted(existing.values(), key=lambda point: point.timestamp)
                 new = self._set_channel_state(new, report.channel.value, history=history)
-            _LOGGER.warning(
+            _LOGGER.debug(
                 "%s: GrowCube history day ch=%s date=%04d-%02d-%02d raw=%d accepted=%d zero=%d total_after=%d",
                 self.data.device_id,
                 report.channel.value,
@@ -790,7 +823,7 @@ class GrowcubeDataCoordinator(DataUpdateCoordinator[GrowcubeData]):
         # 35/36 - history end marker
         elif isinstance(report, HistoryCompleteGrowcubeReport):
             channel_state = new.channels[report.channel.value]
-            _LOGGER.warning(
+            _LOGGER.debug(
                 "%s: GrowCube history complete command=%s ch=%s success=%s points=%d events=%d",
                 self.data.device_id,
                 report.command,
@@ -969,6 +1002,106 @@ class GrowcubeDataCoordinator(DataUpdateCoordinator[GrowcubeData]):
     async def stop_watering(self, channel: int) -> None:
         command = ClosePumpCommand(Channel(channel))
         self.client.send_command(command)
+
+    async def async_reset_network(self) -> None:
+        """Reset GrowCube network settings."""
+
+        if not self.client.connected:
+            raise HomeAssistantError("GrowCube is not connected")
+        _LOGGER.warning("%s: Reset network requested", self.data.device_id)
+        await self.client.reset_network()
+        self.data.connected = False
+        self.async_set_updated_data(self.data)
+        self.start_reconnect(
+            f"GrowCube at {self.host} is resetting network settings and may leave this network."
+        )
+
+    def _schedule_firmware_update_check(self) -> None:
+        if self._firmware_check_task and not self._firmware_check_task.done():
+            return
+        self._firmware_check_task = self.hass.async_create_task(self.async_check_firmware_update(raise_error=False))
+
+    async def async_check_firmware_update(self, raise_error: bool = True) -> None:
+        """Check GrowCube's firmware server for the latest firmware version."""
+
+        self.data.firmware_update_status = "checking"
+        self.data.firmware_update_error = ""
+        self.async_set_updated_data(self.data)
+        try:
+            info = await self.hass.async_add_executor_job(
+                check_growcube_firmware_update,
+                self.data.version,
+            )
+        except Exception as err:
+            self.data.firmware_update_status = "check_error"
+            self.data.firmware_update_error = str(err)
+            self.data.firmware_update_checked_at = datetime.now(timezone.utc).isoformat()
+            self.async_set_updated_data(self.data)
+            _LOGGER.warning("%s: Firmware update check failed: %s", self.data.device_id, err)
+            if raise_error:
+                raise HomeAssistantError(str(err)) from err
+            return
+
+        update_available = bool(info.get("update_available"))
+        latest_version = str(info.get("latest_version") or self.data.version or "")
+        self.data.firmware_latest_version = latest_version
+        self.data.firmware_update_available = update_available
+        self.data.firmware_update_checked_at = datetime.now(timezone.utc).isoformat()
+        self.data.firmware_update_error = ""
+        self.data.firmware_update_status = "update_available" if update_available else "latest_installed"
+        self.async_set_updated_data(self.data)
+
+    async def async_update_firmware(self) -> None:
+        """Download firmware from GrowCube and upload it to the device."""
+
+        if not self.client.connected:
+            raise HomeAssistantError("GrowCube is not connected")
+
+        self.data.firmware_update_status = "updating"
+        self.data.firmware_update_error = ""
+        self.data.firmware_update_started_at = datetime.now(timezone.utc).isoformat()
+        self.async_set_updated_data(self.data)
+        _LOGGER.warning(
+            "%s: Firmware update requested, current version=%s",
+            self.data.device_id,
+            self.data.version or "unknown",
+        )
+
+        firmware_path = None
+        try:
+            firmware_path = await self.hass.async_add_executor_job(
+                download_growcube_firmware_update,
+                self.data.version,
+            )
+            await self.client.start_firmware_update()
+            await asyncio.sleep(FIRMWARE_OTA_READY_DELAY)
+            await self.hass.async_add_executor_job(
+                upload_firmware_image,
+                self.host,
+                firmware_path,
+            )
+        except Exception as err:
+            self.data.firmware_update_status = "error"
+            self.data.firmware_update_error = str(err)
+            self.async_set_updated_data(self.data)
+            _LOGGER.warning("%s: Firmware update failed: %s", self.data.device_id, err)
+            self.start_reconnect(
+                f"GrowCube at {self.host} disconnected during firmware update. Retrying in 10 seconds."
+            )
+            raise HomeAssistantError(str(err)) from err
+        finally:
+            if firmware_path is not None:
+                with contextlib.suppress(OSError):
+                    firmware_path.unlink()
+
+        self.data.firmware_update_status = "uploaded"
+        self.data.firmware_update_error = ""
+        self.data.connected = False
+        self.async_set_updated_data(self.data)
+        self.client.disconnect()
+        self.start_reconnect(
+            f"GrowCube at {self.host} is restarting after firmware update. Retrying in 10 seconds."
+        )
 
     async def handle_water_plant(self, channel: Channel, duration: int) -> None:
         self._ensure_channel_configured(channel.value)
@@ -1261,7 +1394,7 @@ class GrowcubeDataCoordinator(DataUpdateCoordinator[GrowcubeData]):
     async def async_request_history(self, channel: int) -> None:
         current = self.data.channels[channel]
         now = dt_util.now()
-        _LOGGER.warning(
+        _LOGGER.debug(
             "%s: Requesting GrowCube stored history ch=%s existing_points=%d complete=%s loading=%s",
             self.data.device_id,
             channel,

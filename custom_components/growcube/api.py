@@ -325,6 +325,11 @@ class GrowcubeDashboardView(HomeAssistantView):
             "tank_days_left": self._lookup(entity_map, f"{device_id}_tank_days_left"),
             "tank_capacity": self._lookup(entity_map, f"{host}_tank_capacity"),
             "mark_tank_full": self._lookup(entity_map, f"{device_id}_mark_tank_full"),
+            "firmware_version": self._lookup(entity_map, f"{device_id}_firmware_version"),
+            "firmware_update_status": self._lookup(entity_map, f"{device_id}_firmware_update_status"),
+            "reset_network": self._lookup(entity_map, f"{device_id}_reset_network"),
+            "check_firmware": self._lookup(entity_map, f"{device_id}_check_firmware"),
+            "update_firmware": self._lookup(entity_map, f"{device_id}_update_firmware"),
         }
 
     def _channel_entities(
@@ -363,6 +368,43 @@ class GrowcubeDashboardView(HomeAssistantView):
             "watering_issue": self._lookup(entity_map, f"{device_id}_watering_issue_{channel}"),
             "watering_locked": self._lookup(entity_map, f"{device_id}_watering_locked_{channel}"),
         }
+
+
+class GrowcubeDeviceNameView(HomeAssistantView):
+    """Update one GrowCube device display name from the Lovelace card."""
+
+    url = "/api/growcube/device/name"
+    name = "api:growcube:device:name"
+
+    def __init__(self, hass: HomeAssistant) -> None:
+        self.hass = hass
+
+    async def post(self, request: web.Request) -> web.Response:
+        data = await request.json() if request.can_read_body else {}
+        coordinator = self._coordinator(str(data.get("device_id") or ""))
+        if coordinator is None:
+            return self.json({"error": "not_found"}, status_code=404)
+
+        name = str(data.get("name") or "").strip()
+        if not name:
+            return self.json({"error": "name_required"}, status_code=400)
+
+        await coordinator.async_set_device_name(name)
+        return self.json({
+            "ok": True,
+            "device_id": coordinator.data.device_id,
+            "name": name,
+        })
+
+    def _coordinator(self, device_id: str):
+        coordinators = [
+            item for item in self.hass.data.get(DOMAIN, {}).values() if isinstance(item, GrowcubeDataCoordinator)
+        ]
+        if device_id:
+            for coordinator in coordinators:
+                if coordinator.data.device_id == device_id:
+                    return coordinator
+        return coordinators[0] if len(coordinators) == 1 else None
 
 
 class GrowcubeChannelConfigView(HomeAssistantView):

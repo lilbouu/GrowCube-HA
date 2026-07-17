@@ -31,6 +31,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
                         TankRemainingSensor(coordinator),
                         TankLevelSensor(coordinator),
                         TankUsedSensor(coordinator),
+                        FirmwareVersionSensor(coordinator),
+                        FirmwareUpdateStatusSensor(coordinator),
                         TankDaysLeftSensor(coordinator),
                         MoistureSensor(coordinator, 0),
                         MoistureSensor(coordinator, 1),
@@ -129,6 +131,47 @@ class TankUsedSensor(CoordinatorEntity[GrowcubeDataCoordinator], SensorEntity):
     @property
     def native_value(self) -> int:
         return self.coordinator.data.tank_state.used_ml
+
+
+class FirmwareVersionSensor(CoordinatorEntity[GrowcubeDataCoordinator], SensorEntity):
+    _attr_has_entity_name = True
+    _attr_name = "Firmware version"
+    _attr_icon = "mdi:chip"
+
+    def __init__(self, coordinator: GrowcubeDataCoordinator) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{coordinator.data.device_id}_firmware_version"
+        self._attr_device_info = coordinator.data.device_info
+
+    @property
+    def native_value(self) -> str | None:
+        return self.coordinator.data.version
+
+
+class FirmwareUpdateStatusSensor(CoordinatorEntity[GrowcubeDataCoordinator], SensorEntity):
+    _attr_has_entity_name = True
+    _attr_name = "Firmware update status"
+    _attr_icon = "mdi:update"
+
+    def __init__(self, coordinator: GrowcubeDataCoordinator) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{coordinator.data.device_id}_firmware_update_status"
+        self._attr_device_info = coordinator.data.device_info
+
+    @property
+    def native_value(self) -> str:
+        return self.coordinator.data.firmware_update_status
+
+    @property
+    def extra_state_attributes(self) -> dict[str, object]:
+        return {
+            "installed_version": self.coordinator.data.version,
+            "latest_version": self.coordinator.data.firmware_latest_version,
+            "update_available": self.coordinator.data.firmware_update_available,
+            "firmware_update_checked_at": self.coordinator.data.firmware_update_checked_at,
+            "firmware_update_error": self.coordinator.data.firmware_update_error,
+            "firmware_update_started_at": self.coordinator.data.firmware_update_started_at,
+        }
 
 
 class TankDaysLeftSensor(CoordinatorEntity[GrowcubeDataCoordinator], SensorEntity):

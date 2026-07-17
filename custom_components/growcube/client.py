@@ -375,7 +375,7 @@ class GrowcubeClient:
             data = command
 
         if data.startswith(b"elea48#") or data.startswith(b"a48#") or data.startswith(b"elea55#") or data.startswith(b"elea56#"):
-            _LOGGER.warning("GrowCube history TX: %s", data.decode("ascii", errors="replace"))
+            _LOGGER.debug("GrowCube history TX: %s", data.decode("ascii", errors="replace"))
         self._writer.write(data)
         await self._writer.drain()
 
@@ -386,6 +386,16 @@ class GrowcubeClient:
         task = asyncio.create_task(self._close_after(channel, duration))
         self._manual_tasks.add(task)
         task.add_done_callback(self._manual_tasks.discard)
+
+    async def reset_network(self) -> None:
+        """Ask GrowCube to clear Wi-Fi settings and restart."""
+
+        await self.async_send_command(b"ele507")
+
+    async def start_firmware_update(self) -> None:
+        """Ask GrowCube to enter its OTA upload mode."""
+
+        await self.async_send_command(b"ele504")
 
     async def _close_after(self, channel: Channel, duration: int) -> None:
         await asyncio.sleep(max(1, int(duration)))
@@ -401,7 +411,7 @@ class GrowcubeClient:
                 buffer.extend(chunk)
                 for message in parse_messages(buffer):
                     if message.command in (22, 23, 35, 36, 55, 56):
-                        _LOGGER.warning(
+                        _LOGGER.debug(
                             "GrowCube history RX elea%s payload=%s",
                             message.command,
                             message.payload[:240],

@@ -40,6 +40,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
         LoadHistoryButton(coordinator, 2),
         LoadHistoryButton(coordinator, 3),
         MarkTankFullButton(coordinator),
+        ResetNetworkButton(coordinator),
+        CheckFirmwareButton(coordinator),
+        UpdateFirmwareButton(coordinator),
     ]
 
     async_add_entities(buttons)
@@ -169,3 +172,54 @@ class MarkTankFullButton(CoordinatorEntity[GrowcubeDataCoordinator], ButtonEntit
 
     async def async_press(self) -> None:
         await self.coordinator.async_mark_tank_full()
+
+
+class ResetNetworkButton(CoordinatorEntity[GrowcubeDataCoordinator], ButtonEntity):
+    _attr_entity_category = EntityCategory.CONFIG
+
+    def __init__(self, coordinator: GrowcubeDataCoordinator) -> None:
+        super().__init__(coordinator)
+        self._attr_name = "Reset network"
+        self._attr_unique_id = f"{coordinator.data.device_id}_reset_network"
+        self._attr_device_info = coordinator.data.device_info
+
+    @property
+    def icon(self) -> str:
+        return "mdi:wifi-refresh"
+
+    async def async_press(self) -> None:
+        await self.coordinator.async_reset_network()
+
+
+class CheckFirmwareButton(CoordinatorEntity[GrowcubeDataCoordinator], ButtonEntity):
+    _attr_entity_category = EntityCategory.CONFIG
+
+    def __init__(self, coordinator: GrowcubeDataCoordinator) -> None:
+        super().__init__(coordinator)
+        self._attr_name = "Check firmware"
+        self._attr_unique_id = f"{coordinator.data.device_id}_check_firmware"
+        self._attr_device_info = coordinator.data.device_info
+
+    @property
+    def icon(self) -> str:
+        return "mdi:cloud-search-outline"
+
+    async def async_press(self) -> None:
+        await self.coordinator.async_check_firmware_update()
+
+
+class UpdateFirmwareButton(CoordinatorEntity[GrowcubeDataCoordinator], ButtonEntity):
+    _attr_entity_category = EntityCategory.CONFIG
+
+    def __init__(self, coordinator: GrowcubeDataCoordinator) -> None:
+        super().__init__(coordinator)
+        self._attr_name = "Update firmware"
+        self._attr_unique_id = f"{coordinator.data.device_id}_update_firmware"
+        self._attr_device_info = coordinator.data.device_info
+
+    @property
+    def icon(self) -> str:
+        return "mdi:update"
+
+    async def async_press(self) -> None:
+        await self.coordinator.async_update_firmware()

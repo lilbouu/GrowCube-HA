@@ -13,6 +13,7 @@ from .const import DOMAIN
 from .api import (
     GrowcubeChannelConfigView,
     GrowcubeDashboardView,
+    GrowcubeDeviceNameView,
     GrowcubeHistoryView,
     GrowcubePlantByIdView,
     GrowcubePlantImageView,
@@ -25,7 +26,7 @@ from .api import (
 _LOGGER = logging.getLogger(__name__)
 
 CARD_URL = f"/api/{DOMAIN}/growcube-card.js"
-CARD_RESOURCE_URL = f"{CARD_URL}?v=20260714-custom-plants-layout"
+CARD_RESOURCE_URL = f"{CARD_URL}?v=20260717-graph-revert"
 CARD_PATH = Path(__file__).parent / "www" / "growcube-card.js"
 PROVISION_URL = f"/api/{DOMAIN}/provision/index.html"
 PROVISION_PATH = Path(__file__).parent / "www" / "provision"
@@ -54,6 +55,7 @@ async def async_setup_frontend(hass: HomeAssistant) -> None:
         hass.http.register_view(GrowcubePlantImageView(hass))
         hass.http.register_view(GrowcubePlantPhotoUploadView(hass))
         hass.http.register_view(GrowcubeDashboardView(hass))
+        hass.http.register_view(GrowcubeDeviceNameView(hass))
         hass.http.register_view(GrowcubeHistoryView(hass))
         hass.http.register_view(GrowcubeChannelConfigView(hass))
         hass.http.register_view(GrowcubeProvisionSessionView(hass))

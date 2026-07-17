@@ -18,6 +18,14 @@ class GrowcubeCard extends HTMLElement {
     this._detailMenuOpen = false;
     this._aboutDialogOpen = false;
     this._deletePlantDialogOpen = false;
+    this._settingsDialogOpen = false;
+    this._deviceNameDraft = "";
+    this._deviceNameEditing = false;
+    this._firmwareUpdateDialogOpen = false;
+    this._firmwareUpdateAcknowledged = false;
+    this._resetNetworkDialogOpen = false;
+    this._resetNetworkAcknowledged = false;
+    this._firmwareActionPending = "";
     this._aboutProfileCache = {};
     this._aboutProfileLoading = false;
     this._plantWizardOpen = false;
@@ -95,7 +103,7 @@ class GrowcubeCard extends HTMLElement {
 
   set hass(hass) {
     this._hass = hass;
-    if (this._plantWizardOpen || this._editDialog || this._modeWizardOpen) {
+    if (this._plantWizardOpen || this._editDialog || this._modeWizardOpen || this._deviceNameEditing) {
       return;
     }
     this._render();
@@ -136,7 +144,7 @@ class GrowcubeCard extends HTMLElement {
     }
     const url = new URL(window.location.href);
     url.searchParams.set("device", value);
-    window.history.pushState(null, "", `${url.pathname}${url.search}${url.hash}`);
+    window.history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
     this._historyEntity = "";
     this._historyLoadedAt = 0;
     this._cubeHistory = {};
@@ -352,6 +360,11 @@ class GrowcubeCard extends HTMLElement {
       tank_days_left: mappedDeviceEntities.tank_days_left || this._entityBySuffix("sensor", "_tank_days_left"),
       tank_capacity: mappedDeviceEntities.tank_capacity || this._entityBySuffix("number", "_tank_capacity"),
       mark_tank_full: mappedDeviceEntities.mark_tank_full || this._entityBySuffix("button", "_mark_tank_full"),
+      firmware_version: mappedDeviceEntities.firmware_version || this._entityBySuffix("sensor", "_firmware_version"),
+      firmware_update_status: mappedDeviceEntities.firmware_update_status || this._entityBySuffix("sensor", "_firmware_update_status"),
+      reset_network: mappedDeviceEntities.reset_network || this._entityBySuffix("button", "_reset_network"),
+      check_firmware: mappedDeviceEntities.check_firmware || this._entityBySuffix("button", "_check_firmware"),
+      update_firmware: mappedDeviceEntities.update_firmware || this._entityBySuffix("button", "_update_firmware"),
     };
     return {
       ...entities,
@@ -652,7 +665,7 @@ class GrowcubeCard extends HTMLElement {
     }
     this._cubeHistoryLoading[channel] = true;
     try {
-      const shouldRequest = !cached?.history_complete || !cached?.watering_events_complete;
+      const shouldRequest = !cached?.history_loading && (!cached?.history_complete || !cached?.watering_events_complete);
       const params = new URLSearchParams({
         channel,
         request: shouldRequest ? "1" : "0",
@@ -690,7 +703,7 @@ class GrowcubeCard extends HTMLElement {
         }
         this._cubeHistoryPollTimer = setTimeout(() => {
           this._loadCubeHistoryApiIfNeeded(true);
-        }, 3000);
+        }, 5000);
       }
       this._render();
     }
@@ -712,6 +725,18 @@ class GrowcubeCard extends HTMLElement {
       payload[key] = value;
     });
     return this._hass.callApi("POST", "growcube/channel/config", payload);
+  }
+
+  async _setDeviceNameApi(name) {
+    if (!this._hass?.callApi) {
+      return undefined;
+    }
+    const payload = { name };
+    const deviceId = this._deviceIdHint();
+    if (deviceId) {
+      payload.device_id = deviceId;
+    }
+    return this._hass.callApi("POST", "growcube/device/name", payload);
   }
 
   _entityDisplay(entityId, fallback = "Unknown") {
@@ -1614,6 +1639,30 @@ class GrowcubeCard extends HTMLElement {
     return Number(min) !== 0 || Number(max) !== 0;
   }
 
+  _rangeValueClass(value, min, max) {
+    const numericValue = Number.parseFloat(String(value).replace(",", "."));
+    const numericMin = Number(min);
+    const numericMax = Number(max);
+    if (!Number.isFinite(numericValue) || !this._hasRange(numericMin, numericMax)) {
+      return "";
+    }
+    if (Number.isFinite(numericMin) && numericMin !== 0 && numericValue < numericMin) {
+      return " below-range";
+    }
+    if (Number.isFinite(numericMax) && numericMax !== 0 && numericValue > numericMax) {
+      return " above-range";
+    }
+    return "";
+  }
+
+  _moistureStatusClass(entities, fallbackMin = undefined, fallbackMax = undefined) {
+    return this._rangeValueClass(
+      this._entityState(entities?.moisture, ""),
+      this._entityState(entities?.smart_min_moisture, fallbackMin),
+      this._entityState(entities?.smart_max_moisture, fallbackMax),
+    );
+  }
+
   _render() {
     if (!this.shadowRoot || !this._config) {
       return;
@@ -1627,6 +1676,7 @@ class GrowcubeCard extends HTMLElement {
     const graph = this._config.graph;
     const detail = Boolean(this._config.detail);
     const dashboard = overview === "dashboard";
+    const settings = overview === "settings";
     const mode = this._normalizeMode(this._entityState(entities.mode, "Disabled"));
     const next = this._nextWateringDisplay(entities.next_watering, "Unknown");
     const moisture = this._entityDisplay(entities.moisture, "Unknown");
@@ -1678,7 +1728,8 @@ class GrowcubeCard extends HTMLElement {
           box-shadow: none;
         }
 
-        ha-card.dashboard-host-card {
+        ha-card.dashboard-host-card,
+        ha-card.settings-host-card {
           overflow: visible;
           background: transparent;
           border: 0;
@@ -1738,6 +1789,16 @@ class GrowcubeCard extends HTMLElement {
 
         .activity-row.problem .activity-title {
           color: var(--error-color);
+        }
+
+        .value.below-range,
+        .chart-current-stat .value.below-range {
+          color: var(--error-color);
+        }
+
+        .value.above-range,
+        .chart-current-stat .value.above-range {
+          color: var(--info-color, #039be5);
         }
 
         .activity-title {
@@ -1912,14 +1973,15 @@ class GrowcubeCard extends HTMLElement {
           width: 100%;
           max-width: 1660px;
           margin: 0 auto;
-          padding: 0 12px;
+          padding: 16px 12px 0;
         }
 
         .dashboard-toolbar {
-          position: absolute;
-          top: 10px;
-          right: 22px;
-          z-index: 5;
+          display: flex;
+          align-items: flex-start;
+          justify-content: flex-end;
+          gap: 8px;
+          min-width: 0;
         }
 
         .dashboard-grid {
@@ -1927,17 +1989,38 @@ class GrowcubeCard extends HTMLElement {
           grid-template-columns: repeat(2, minmax(0, 1fr));
           gap: 14px;
           align-items: start;
-          padding-top: 18px;
-        }
-
-        .dashboard-card.has-device-switcher .dashboard-grid {
-          padding-top: 62px;
+          padding-top: 16px;
         }
 
         .dashboard-column {
           display: grid;
           gap: 14px;
           min-width: 0;
+        }
+
+        .settings-grid {
+          display: grid;
+          grid-template-columns: minmax(300px, 0.9fr) minmax(380px, 1.25fr);
+          gap: 14px;
+          align-items: start;
+          width: min(100%, 1120px);
+          margin: 0 auto;
+          padding-top: 62px;
+        }
+
+        .settings-header {
+          grid-column: 1 / -1;
+        }
+
+        .settings-card {
+          box-sizing: border-box;
+          min-width: 0;
+          padding: 16px;
+          border: 1px solid var(--divider-color);
+          border-radius: 14px;
+          background: var(--ha-card-background, var(--card-background-color));
+          box-shadow: var(--ha-card-box-shadow, none);
+          container-type: inline-size;
         }
 
         .dashboard-card .card {
@@ -1975,6 +2058,25 @@ class GrowcubeCard extends HTMLElement {
 
         .device-pill ha-icon {
           --mdc-icon-size: 18px;
+        }
+
+        .settings-pill {
+          width: 38px;
+          min-width: 38px;
+          min-height: 38px;
+          display: inline-grid;
+          place-items: center;
+          padding: 0;
+          color: var(--primary-text-color);
+          background: var(--ha-card-background, var(--card-background-color));
+          border: 1px solid var(--divider-color);
+          border-radius: 999px;
+          box-shadow: var(--ha-card-box-shadow, 0 8px 18px rgba(0, 0, 0, 0.22));
+          cursor: pointer;
+        }
+
+        .settings-pill ha-icon {
+          --mdc-icon-size: 19px;
         }
 
         .device-menu {
@@ -2106,6 +2208,176 @@ class GrowcubeCard extends HTMLElement {
           display: grid;
           gap: 10px;
           margin-top: 16px;
+        }
+
+        .device-settings-list {
+          display: grid;
+          gap: 8px;
+          margin-top: 0;
+        }
+
+        .plant-row.active {
+          background: color-mix(in srgb, var(--primary-color) 11%, transparent);
+          border-color: color-mix(in srgb, var(--primary-color) 38%, var(--divider-color));
+        }
+
+        .settings-device-row {
+          grid-template-columns: 44px minmax(0, 1fr) auto;
+          gap: 10px;
+          padding: 10px;
+        }
+
+        .settings-device-row .plant-photo {
+          width: 44px;
+          height: 44px;
+          border-radius: 9px;
+        }
+
+        .settings-device-row .title {
+          font-size: 16px;
+        }
+
+        .settings-device-row .label {
+          font-size: 12px;
+        }
+
+        .settings-device-row .subtitle {
+          display: none;
+        }
+
+        .settings-device-row .value {
+          font-size: 14px;
+          margin-top: 3px;
+        }
+
+        .settings-control-card .header {
+          grid-template-columns: 34px 1fr;
+          gap: 10px;
+        }
+
+        .settings-control-card {
+          display: grid;
+          gap: 12px;
+        }
+
+        .settings-control-card .plant-icon {
+          width: 34px;
+          height: 34px;
+        }
+
+        .settings-control-card .title {
+          font-size: 18px;
+        }
+
+        .settings-control-card .overview-grid {
+          gap: 8px;
+          margin-top: 0;
+        }
+
+        .settings-control-card .stat {
+          padding: 10px;
+        }
+
+        .settings-control-card .value {
+          font-size: 16px;
+        }
+
+        .settings-actions {
+          display: grid;
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+          gap: 8px;
+          margin-top: 0;
+        }
+
+        .settings-actions .wide-button {
+          margin-top: 0;
+          height: 40px;
+        }
+
+        .settings-actions .wide-button:last-child {
+          grid-column: 1 / -1;
+        }
+
+        .firmware-summary {
+          display: grid;
+          gap: 8px;
+          padding: 12px;
+          border: 1px solid color-mix(in srgb, var(--primary-color) 28%, var(--divider-color));
+          border-radius: 10px;
+          background: color-mix(in srgb, var(--primary-color) 7%, transparent);
+        }
+
+        .firmware-summary.update-available {
+          border-color: color-mix(in srgb, var(--warning-color, #ffa600) 55%, var(--divider-color));
+          background: color-mix(in srgb, var(--warning-color, #ffa600) 10%, transparent);
+        }
+
+        .firmware-summary.latest-installed {
+          border-color: color-mix(in srgb, var(--success-color, #43a047) 45%, var(--divider-color));
+          background: color-mix(in srgb, var(--success-color, #43a047) 8%, transparent);
+        }
+
+        .firmware-summary.error {
+          border-color: color-mix(in srgb, var(--error-color) 48%, var(--divider-color));
+          background: color-mix(in srgb, var(--error-color) 8%, transparent);
+        }
+
+        .firmware-title {
+          display: flex;
+          gap: 8px;
+          align-items: center;
+          font-size: 14px;
+          font-weight: 650;
+          color: var(--primary-text-color);
+        }
+
+        .firmware-title ha-icon {
+          --mdc-icon-size: 18px;
+          color: var(--primary-color);
+        }
+
+        .firmware-detail {
+          font-size: 13px;
+          line-height: 1.35;
+          color: var(--secondary-text-color);
+        }
+
+        .firmware-progress {
+          display: grid;
+          grid-template-columns: 24px minmax(0, 1fr);
+          gap: 10px;
+          align-items: center;
+          padding: 12px;
+          border: 1px solid color-mix(in srgb, var(--primary-color) 36%, var(--divider-color));
+          border-radius: 10px;
+          background: color-mix(in srgb, var(--primary-color) 8%, transparent);
+        }
+
+        .firmware-spinner {
+          width: 20px;
+          height: 20px;
+          border: 2px solid color-mix(in srgb, var(--primary-color) 24%, transparent);
+          border-top-color: var(--primary-color);
+          border-radius: 50%;
+          animation: growcube-spin 0.8s linear infinite;
+        }
+
+        .firmware-progress-title {
+          font-size: 14px;
+          font-weight: 650;
+          color: var(--primary-text-color);
+        }
+
+        .firmware-progress-detail {
+          margin-top: 2px;
+          font-size: 13px;
+          color: var(--secondary-text-color);
+        }
+
+        @keyframes growcube-spin {
+          to {
+            transform: rotate(360deg);
+          }
         }
 
         .tool-panel {
@@ -2632,13 +2904,13 @@ class GrowcubeCard extends HTMLElement {
           }
 
           .dashboard-toolbar,
-          .dashboard-grid {
+          .dashboard-grid,
+          .settings-grid {
             grid-template-columns: 1fr;
           }
 
-          .dashboard-toolbar {
-            top: 8px;
-            right: 18px;
+          .settings-actions {
+            grid-template-columns: 1fr;
           }
 
           .device-pill {
@@ -2805,6 +3077,108 @@ class GrowcubeCard extends HTMLElement {
           margin-top: 56px;
           padding: 0;
           overflow: hidden;
+        }
+
+        .settings-dialog {
+          width: min(420px, calc(100vw - 40px));
+          max-height: calc(100vh - 40px);
+          display: grid;
+          gap: 14px;
+          padding: 18px;
+        }
+
+        .settings-dialog .settings-card,
+        .settings-dialog .settings-control-card {
+          padding: 0;
+          border: 0;
+          background: transparent;
+          box-shadow: none;
+        }
+
+        .settings-dialog .about-dialog-header {
+          align-items: center;
+        }
+
+        .settings-device-name-row {
+          display: grid;
+          grid-template-columns: minmax(0, 1fr) 36px;
+          gap: 8px;
+          align-items: center;
+          margin-top: 2px;
+        }
+
+        .settings-device-name-input {
+          width: 100%;
+          height: 38px;
+          min-width: 0;
+          box-sizing: border-box;
+          border: 1px solid transparent;
+          border-radius: 9px;
+          padding: 0 10px;
+          color: var(--primary-text-color);
+          background: transparent;
+          font: inherit;
+          font-size: 18px;
+          font-weight: 650;
+          outline: none;
+        }
+
+        .settings-device-name-input:hover,
+        .settings-device-name-input:focus {
+          border-color: color-mix(in srgb, var(--primary-text-color) 18%, transparent);
+        }
+
+        .settings-name-edit-icon {
+          width: 34px;
+          height: 34px;
+          display: grid;
+          place-items: center;
+          border-radius: 50%;
+          color: var(--primary-color);
+          background: color-mix(in srgb, var(--primary-color) 14%, transparent);
+          pointer-events: none;
+        }
+
+        .settings-device-name-row:hover .settings-name-edit-icon,
+        .settings-device-name-input:focus + .settings-name-edit-icon {
+          color: var(--primary-text-color);
+          background: color-mix(in srgb, var(--primary-color) 28%, transparent);
+        }
+
+        .settings-name-edit-icon ha-icon {
+          --mdc-icon-size: 18px;
+        }
+
+        .settings-meta-row {
+          display: flex;
+          justify-content: space-between;
+          gap: 12px;
+          align-items: center;
+          color: var(--secondary-text-color);
+          font-size: 14px;
+        }
+
+        .settings-firmware-value {
+          color: var(--primary-text-color);
+          font-weight: 650;
+        }
+
+        .settings-dialog .firmware-summary,
+        .settings-dialog .firmware-progress {
+          margin-top: 0;
+        }
+
+        .settings-dialog .settings-actions {
+          grid-template-columns: 1fr 1fr;
+        }
+
+        .settings-dialog .settings-actions .wide-button:last-child {
+          grid-column: auto;
+        }
+
+        button.danger {
+          background: var(--error-color);
+          color: var(--text-primary-color);
         }
 
         .about-dialog-body {
@@ -3105,7 +3479,7 @@ class GrowcubeCard extends HTMLElement {
         }
       </style>
 
-      <ha-card class="${detail ? "detail-card" : dashboard ? "dashboard-host-card" : ""}">
+      <ha-card class="${detail ? "detail-card" : dashboard ? "dashboard-host-card" : settings ? "settings-host-card" : ""}">
         ${renderLegacyAsPlants ? this._plantsTemplate() : overview ? this._overviewTemplate({ entities, overview }) : detail ? this._detailTemplate({
           deviceRecord,
           entities,
@@ -3124,7 +3498,18 @@ class GrowcubeCard extends HTMLElement {
           smartRange,
           smartDaytimeWatering,
           problems,
-        }) : this._summaryTemplate({ entities, plantConfigured, mode, next, moisture, manualDuration, smartRange, problems })}
+        }) : this._summaryTemplate({
+          entities,
+          plantConfigured,
+          mode,
+          next,
+          moisture,
+          manualDuration,
+          smartRange,
+          smartMinMoisture,
+          smartMaxMoisture,
+          problems,
+        })}
       </ha-card>
 
       ${this._reservoirGuideOpen ? this._reservoirGuideTemplate() : ""}
@@ -3134,6 +3519,9 @@ class GrowcubeCard extends HTMLElement {
       ${this._customPlantsOpen ? this._customPlantsDialogTemplate() : ""}
       ${this._modeWizardOpen ? this._modeWizardDialogTemplate() : ""}
       ${this._deletePlantDialogOpen ? this._deletePlantDialogTemplate() : ""}
+      ${this._settingsDialogOpen ? this._settingsDialogTemplate({ entities }) : ""}
+      ${this._firmwareUpdateDialogOpen ? this._firmwareUpdateDialogTemplate() : ""}
+      ${this._resetNetworkDialogOpen ? this._resetNetworkDialogTemplate() : ""}
       ${this._toast ? `<div class="toast">${this._escape(this._toast)}</div>` : ""}
     `;
 
@@ -3158,6 +3546,9 @@ class GrowcubeCard extends HTMLElement {
     }
     if (overview === "activity") {
       return this._activityOverviewTemplate();
+    }
+    if (overview === "settings") {
+      return this._dashboardTemplate({ entities });
     }
     return this._statusTemplate({ entities });
   }
@@ -3197,9 +3588,10 @@ class GrowcubeCard extends HTMLElement {
     const device = this._deviceRecord();
     const hasDeviceSwitcher = this._deviceRecords().length > 1;
     return `
-      <div class="dashboard-card ${hasDeviceSwitcher ? "has-device-switcher" : ""}">
+      <div class="dashboard-card has-dashboard-toolbar ${hasDeviceSwitcher ? "has-device-switcher" : ""}">
         <div class="dashboard-toolbar">
           ${this._globalDeviceSwitcherTemplate(device?.device_id)}
+          ${this._settingsButtonTemplate()}
         </div>
         <div class="dashboard-grid">
           <div class="dashboard-column">
@@ -3210,6 +3602,165 @@ class GrowcubeCard extends HTMLElement {
             ${this._tankTemplate({ entities })}
             ${this._activityOverviewTemplate()}
           </div>
+        </div>
+      </div>
+    `;
+  }
+
+  _settingsTemplate({ entities }) {
+    const device = this._deviceRecord();
+    const devices = this._deviceRecords();
+    const hasDeviceSwitcher = devices.length > 1;
+    return `
+      <div class="dashboard-card ${hasDeviceSwitcher ? "has-device-switcher" : ""}">
+        <div class="dashboard-toolbar">
+          ${this._globalDeviceSwitcherTemplate(device?.device_id)}
+        </div>
+        <div class="settings-grid">
+          <div class="settings-header">
+            <div class="header">
+              <div class="plant-icon"><ha-icon icon="mdi:cog-outline"></ha-icon></div>
+              <div>
+                <div class="title">Settings</div>
+                <div class="subtitle">${devices.length} GrowCube device${devices.length === 1 ? "" : "s"}</div>
+              </div>
+            </div>
+          </div>
+          <div class="settings-card">
+            <div class="device-settings-list">
+              ${devices.map((item) => this._settingsDeviceRowTemplate(item, item.device_id === device?.device_id)).join("")}
+            </div>
+          </div>
+          ${this._deviceSettingsTemplate({ entities })}
+        </div>
+      </div>
+    `;
+  }
+
+  _settingsDeviceRowTemplate(device, active) {
+    const entities = {
+      ...this._entities(),
+      ...Object.fromEntries(Object.entries(device.entities || {}).filter(([, value]) => value)),
+    };
+    return `
+      <div class="plant-row settings-device-row ${active ? "active" : ""}" data-action="select-device" data-device-id="${this._escape(device.device_id)}" role="button" tabindex="0">
+        <div class="plant-photo">
+          <ha-icon icon="${active ? "mdi:cube" : "mdi:cube-outline"}"></ha-icon>
+        </div>
+        <div class="plant-meta">
+          <div class="title">${this._escape(device.name || device.device_id || "GrowCube")}</div>
+        </div>
+        <div class="plant-stats">
+          <div class="label">Firmware</div>
+          <div class="value">${this._escape(this._entityDisplay(entities.firmware_version, "Unknown"))}</div>
+        </div>
+      </div>
+    `;
+  }
+
+  _deviceSettingsTemplate({ entities }) {
+    const device = this._deviceRecord();
+    const deviceEntities = {
+      ...entities,
+      ...Object.fromEntries(Object.entries(device?.entities || {}).filter(([, value]) => value)),
+    };
+    const canResetNetwork = Boolean(deviceEntities.reset_network);
+    const canCheckFirmware = Boolean(deviceEntities.check_firmware);
+    const canUpdateFirmware = Boolean(deviceEntities.update_firmware);
+    const deviceName = device?.name || device?.device_id || "GrowCube";
+    const deviceNameValue = this._deviceNameEditing ? this._deviceNameDraft : deviceName;
+    const statusState = this._state(deviceEntities.firmware_update_status);
+    const statusAttrs = statusState?.attributes || {};
+    const status = this._entityDisplay(deviceEntities.firmware_update_status, "Idle");
+    const installedVersion = this._entityDisplay(deviceEntities.firmware_version, "Unknown");
+    const latestVersion = statusAttrs.latest_version || installedVersion;
+    const updateAvailable = statusAttrs.update_available;
+    const checkedAt = statusAttrs.firmware_update_checked_at;
+    const pendingAction = this._firmwareActionPending;
+    const busy = Boolean(pendingAction) || ["checking", "updating", "uploaded"].includes(status);
+    const showFirmwareSummary = !busy && (updateAvailable === true || updateAvailable === false || status === "check_error" || status === "error") && Boolean(checkedAt || status !== "idle");
+    const showUpdateButton = updateAvailable === true;
+    const busyTitle = pendingAction === "checking" || status === "checking"
+      ? "Checking firmware version"
+      : status === "uploaded"
+        ? "Firmware uploaded"
+        : "Firmware update in progress";
+    const busyDetail = pendingAction === "checking" || status === "checking"
+      ? "Contacting GrowCube firmware server..."
+      : status === "uploaded"
+        ? "The update was uploaded. GrowCube is restarting and will reconnect shortly."
+        : "Downloading firmware and uploading it to GrowCube. Keep the device powered on.";
+    const statusClass = updateAvailable === true
+      ? "update-available"
+      : updateAvailable === false
+        ? "latest-installed"
+        : status === "check_error" || status === "error"
+          ? "error"
+          : "";
+    const firmwareCopy = updateAvailable === true
+      ? `Version ${latestVersion} is available.`
+      : updateAvailable === false
+        ? `Installed firmware ${installedVersion} is the latest version.`
+        : status === "checking"
+          ? "Checking GrowCube firmware server..."
+          : "Firmware version has not been checked yet.";
+    return `
+      <div class="settings-card settings-control-card">
+        <div class="settings-device-name-row">
+          <input class="settings-device-name-input" data-device-name-input value="${this._escape(deviceNameValue)}" aria-label="Cube name">
+          <div class="settings-name-edit-icon"><ha-icon icon="mdi:pencil"></ha-icon></div>
+        </div>
+        <div class="settings-meta-row">
+          <span>Firmware</span>
+          <span class="settings-firmware-value">${this._escape(installedVersion)}</span>
+        </div>
+        ${showFirmwareSummary ? `<div class="firmware-summary ${this._escape(statusClass)}">
+          <div class="firmware-title">
+            <ha-icon icon="${updateAvailable === true ? "mdi:update" : updateAvailable === false ? "mdi:check-circle-outline" : "mdi:cloud-search-outline"}"></ha-icon>
+            <span>${updateAvailable === true ? "Firmware update available" : updateAvailable === false ? "Firmware is up to date" : "Firmware update check"}</span>
+          </div>
+          <div class="firmware-detail">${this._escape(firmwareCopy)}</div>
+        </div>` : ""}
+        ${busy ? `
+          <div class="firmware-progress">
+            <div class="firmware-spinner" aria-hidden="true"></div>
+            <div>
+              <div class="firmware-progress-title">${this._escape(busyTitle)}</div>
+              <div class="firmware-progress-detail">${this._escape(busyDetail)}</div>
+            </div>
+          </div>
+        ` : ""}
+        <div class="settings-actions">
+          <button type="button" class="wide-button secondary" data-action="check-firmware" data-entity="${this._escape(deviceEntities.check_firmware)}" ${canCheckFirmware && !busy ? "" : "disabled"}>Check latest version</button>
+          ${showUpdateButton ? `<button type="button" class="wide-button" data-action="update-firmware" data-entity="${this._escape(deviceEntities.update_firmware)}" ${canUpdateFirmware && !busy ? "" : "disabled"}>Update firmware</button>` : ""}
+          <button type="button" class="wide-button danger" data-action="reset-network" data-entity="${this._escape(deviceEntities.reset_network)}" ${canResetNetwork && !busy ? "" : "disabled"}>Reset network</button>
+        </div>
+      </div>
+    `;
+  }
+
+  _settingsButtonTemplate() {
+    return `
+      <button type="button" class="settings-pill" data-action="open-settings-dialog" aria-label="Open GrowCube settings">
+        <ha-icon icon="mdi:cog-outline"></ha-icon>
+      </button>
+    `;
+  }
+
+  _settingsDialogTemplate({ entities }) {
+    const device = this._deviceRecord();
+    return `
+      <div class="dialog-backdrop" data-action="close-settings-dialog">
+        <div class="dialog settings-dialog" role="dialog" aria-modal="true" aria-label="GrowCube settings">
+          <div class="about-dialog-header">
+            <div>
+              <div class="dialog-title">Settings</div>
+            </div>
+            <button type="button" class="icon-button" data-action="close-settings-button" aria-label="Close settings">
+              <ha-icon icon="mdi:close"></ha-icon>
+            </button>
+          </div>
+          ${this._deviceSettingsTemplate({ entities })}
         </div>
       </div>
     `;
@@ -3276,11 +3827,12 @@ class GrowcubeCard extends HTMLElement {
     const photoUrl = this._entityState(entities.photo_url, "");
     const name = this._entityDisplay(entities.name, this._channelName(channel));
     const moisture = this._entityDisplay(entities.moisture, "Unknown");
+    const moistureClass = this._moistureStatusClass(entities);
     const mode = this._normalizeMode(this._entityState(entities.mode, "Disabled"));
     return `
       <div class="plant-row" data-action="navigate-channel" data-channel="${this._escape(channel)}" data-device-id="${this._escape(deviceId)}" role="button" tabindex="0">
         <div class="plant-photo">
-          ${photoUrl ? `<img src="${this._escape(photoUrl)}" alt="">` : '<ha-icon icon="mdi:flower"></ha-icon>'}
+          ${photoUrl ? `<img src="${this._escape(photoUrl)}" alt="" referrerpolicy="no-referrer">` : '<ha-icon icon="mdi:flower"></ha-icon>'}
         </div>
         <div class="plant-meta">
           <div class="title">${this._escape(name)}</div>
@@ -3288,7 +3840,7 @@ class GrowcubeCard extends HTMLElement {
         </div>
         <div class="plant-stats">
           <div class="label">Moisture</div>
-          <div class="value">${this._escape(moisture)}</div>
+          <div class="value${this._escape(moistureClass)}">${this._escape(moisture)}</div>
         </div>
       </div>
     `;
@@ -3299,6 +3851,12 @@ class GrowcubeCard extends HTMLElement {
     const deviceEntities = device?.entities || entities;
     const tankRemaining = this._entityDisplay(deviceEntities.tank_remaining, "Unknown");
     const tankDaysLeft = this._entityDisplay(deviceEntities.tank_days_left, "Unknown");
+    const profile = this._profileMetadata(entities);
+    const humidityClass = this._rangeValueClass(
+      this._entityState(deviceEntities.humidity, ""),
+      profile.airHumidityMin,
+      profile.airHumidityMax,
+    );
     return `
       <div class="card">
         <div class="header">
@@ -3315,7 +3873,7 @@ class GrowcubeCard extends HTMLElement {
           </div>
           <div class="stat" data-action="more-info" data-entity="${this._escape(deviceEntities.humidity)}" role="button" tabindex="0">
             <div class="label">Humidity</div>
-            <div class="value">${this._escape(this._entityDisplay(deviceEntities.humidity, "Unknown"))}</div>
+            <div class="value${this._escape(humidityClass)}">${this._escape(this._entityDisplay(deviceEntities.humidity, "Unknown"))}</div>
           </div>
           <div class="stat">
             <div class="label">Tank</div>
@@ -3509,7 +4067,18 @@ class GrowcubeCard extends HTMLElement {
     mount();
   }
 
-  _summaryTemplate({ entities, plantConfigured, mode, next, moisture, manualDuration, smartRange, problems }) {
+  _summaryTemplate({
+    entities,
+    plantConfigured,
+    mode,
+    next,
+    moisture,
+    manualDuration,
+    smartRange,
+    smartMinMoisture,
+    smartMaxMoisture,
+    problems,
+  }) {
     if (!plantConfigured) {
       return this._emptyChannelTemplate({ entities });
     }
@@ -3517,6 +4086,7 @@ class GrowcubeCard extends HTMLElement {
     const blocked = this._wateringBlocked(problems);
     const automaticLabel = mode === "Smart" ? "Moisture range" : "Next watering";
     const automaticValue = mode === "Smart" ? smartRange : next;
+    const moistureClass = this._moistureStatusClass(entities, smartMinMoisture, smartMaxMoisture);
     return `
       <div class="card summary" data-action="navigate">
         <div class="header">
@@ -3530,7 +4100,7 @@ class GrowcubeCard extends HTMLElement {
         <div class="stats">
           <div class="stat">
             <div class="label">Moisture</div>
-            <div class="value">${this._escape(moisture)}</div>
+            <div class="value${this._escape(moistureClass)}">${this._escape(moisture)}</div>
           </div>
           <div class="stat">
             <div class="label">${this._escape(automaticLabel)}</div>
@@ -3680,10 +4250,11 @@ class GrowcubeCard extends HTMLElement {
     if (!entities?.moisture) {
       return "";
     }
+    const moistureClass = this._moistureStatusClass(entities);
     return `
       <div class="chart-current-stat${floating ? " floating" : ""}" data-action="more-info" data-entity="${this._escape(entities.moisture)}" role="button" tabindex="0">
         <div class="label">Moisture</div>
-        <div class="value">${this._escape(moisture)}</div>
+        <div class="value${this._escape(moistureClass)}">${this._escape(moisture)}</div>
       </div>
     `;
   }
@@ -4072,6 +4643,7 @@ class GrowcubeCard extends HTMLElement {
   }
 
   _emptyChannelTemplate({ entities }) {
+    const moistureClass = this._moistureStatusClass(entities);
     return `
       <div class="card summary">
         <div class="header">
@@ -4084,7 +4656,7 @@ class GrowcubeCard extends HTMLElement {
         <div class="stats">
           <div class="stat">
             <div class="label">Moisture</div>
-            <div class="value">${this._escape(this._entityDisplay(entities.moisture, "Unknown"))}</div>
+            <div class="value${this._escape(moistureClass)}">${this._escape(this._entityDisplay(entities.moisture, "Unknown"))}</div>
           </div>
           <div class="stat">
             <div class="label">Watering</div>
@@ -4913,8 +5485,74 @@ class GrowcubeCard extends HTMLElement {
     `;
   }
 
+  _firmwareUpdateDialogTemplate() {
+    const device = this._deviceRecord();
+    const deviceName = device?.name || device?.device_id || "this GrowCube";
+    const deviceEntities = {
+      ...this._entities(),
+      ...Object.fromEntries(Object.entries(device?.entities || {}).filter(([, value]) => value)),
+    };
+    const statusAttrs = this._state(deviceEntities.firmware_update_status)?.attributes || {};
+    const installedVersion = this._entityDisplay(deviceEntities.firmware_version, "Unknown");
+    const latestVersion = statusAttrs.latest_version || installedVersion;
+    const versionText = latestVersion && latestVersion !== installedVersion
+      ? `Installed version: ${installedVersion}. Latest version: ${latestVersion}.`
+      : `Installed version: ${installedVersion}.`;
+    const acknowledged = this._firmwareUpdateAcknowledged;
+    return `
+      <div class="dialog-backdrop" data-action="close-firmware-update-dialog">
+        <div class="dialog edit-dialog" role="dialog" aria-modal="true" aria-label="Update firmware">
+          <div class="dialog-title">Update firmware</div>
+          <div class="subtitle">${this._escape(versionText)} GrowCube ${this._escape(deviceName)} will disconnect and restart while the firmware is uploaded. Keep the device powered on.</div>
+          <label class="guide-checkbox">
+            <input type="checkbox" data-action="toggle-firmware-update-ack" ${acknowledged ? "checked" : ""}>
+            <span>I have read this and the GrowCube is powered on.</span>
+          </label>
+          <div class="dialog-actions">
+            <button type="button" class="secondary" data-action="close-firmware-update-button">Cancel</button>
+            <button type="button" class="danger" data-action="confirm-firmware-update" ${acknowledged ? "" : "disabled"}>Update</button>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  _resetNetworkDialogTemplate() {
+    const device = this._deviceRecord();
+    const deviceName = device?.name || device?.device_id || "this GrowCube";
+    const acknowledged = this._resetNetworkAcknowledged;
+    return `
+      <div class="dialog-backdrop" data-action="close-reset-network-dialog">
+        <div class="dialog edit-dialog" role="dialog" aria-modal="true" aria-label="Reset network">
+          <div class="dialog-title">Reset network</div>
+          <div class="subtitle">GrowCube ${this._escape(deviceName)} will forget the current Wi-Fi network and may disconnect from Home Assistant.</div>
+          <label class="guide-checkbox">
+            <input type="checkbox" data-action="toggle-reset-network-ack" ${acknowledged ? "checked" : ""}>
+            <span>I understand the GrowCube will need network setup again.</span>
+          </label>
+          <div class="dialog-actions">
+            <button type="button" class="secondary" data-action="close-reset-network-button">Cancel</button>
+            <button type="button" class="danger" data-action="confirm-reset-network" ${acknowledged ? "" : "disabled"}>Reset</button>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
   _closeDeletePlantDialog() {
     this._deletePlantDialogOpen = false;
+    this._render();
+  }
+
+  _closeFirmwareUpdateDialog() {
+    this._firmwareUpdateDialogOpen = false;
+    this._firmwareUpdateAcknowledged = false;
+    this._render();
+  }
+
+  _closeResetNetworkDialog() {
+    this._resetNetworkDialogOpen = false;
+    this._resetNetworkAcknowledged = false;
     this._render();
   }
 
@@ -4929,6 +5567,83 @@ class GrowcubeCard extends HTMLElement {
       window.dispatchEvent(new CustomEvent("location-changed"));
     } catch (error) {
       this._showError("Delete failed");
+    }
+  }
+
+  async _confirmFirmwareUpdate() {
+    if (!this._firmwareUpdateAcknowledged) {
+      this._showError("Confirm that the GrowCube is powered on");
+      return;
+    }
+    const device = this._deviceRecord();
+    const deviceEntities = {
+      ...this._entities(),
+      ...Object.fromEntries(Object.entries(device?.entities || {}).filter(([, value]) => value)),
+    };
+    try {
+      this._firmwareActionPending = "updating";
+      this._firmwareUpdateDialogOpen = false;
+      this._render();
+      await this._press(deviceEntities.update_firmware);
+      this._firmwareActionPending = "";
+      this._dashboardDevicesLoadedAt = 0;
+      this._loadDashboardDevicesIfNeeded(true);
+      this._showToast("Firmware update started");
+      this._render();
+    } catch (error) {
+      this._firmwareActionPending = "";
+      this._render();
+      this._showError("Could not start firmware update");
+    }
+  }
+
+  async _confirmResetNetwork() {
+    if (!this._resetNetworkAcknowledged) {
+      this._showError("Confirm network reset first");
+      return;
+    }
+    const device = this._deviceRecord();
+    const deviceEntities = {
+      ...this._entities(),
+      ...Object.fromEntries(Object.entries(device?.entities || {}).filter(([, value]) => value)),
+    };
+    try {
+      await this._press(deviceEntities.reset_network);
+      this._resetNetworkDialogOpen = false;
+      this._resetNetworkAcknowledged = false;
+      this._showToast("Network reset requested");
+      this._render();
+    } catch (error) {
+      this._showError("Could not reset network");
+    }
+  }
+
+  async _saveDeviceNameFromInput(input) {
+    const name = String(input?.value || "").trim();
+    const currentName = String(this._deviceRecord()?.name || "").trim();
+    if (!name) {
+      this._deviceNameEditing = false;
+      this._deviceNameDraft = "";
+      this._render();
+      return;
+    }
+    if (name === currentName) {
+      this._deviceNameEditing = false;
+      this._deviceNameDraft = "";
+      return;
+    }
+    try {
+      await this._setDeviceNameApi(name);
+      this._deviceNameEditing = false;
+      this._deviceNameDraft = "";
+      this._dashboardDevicesLoadedAt = 0;
+      await this._loadDashboardDevicesIfNeeded(true);
+      this._showToast("Cube name updated");
+    } catch (error) {
+      this._deviceNameEditing = false;
+      this._deviceNameDraft = "";
+      this._render();
+      this._showError("Could not update cube name");
     }
   }
 
@@ -5116,6 +5831,25 @@ class GrowcubeCard extends HTMLElement {
   }
 
   _bindEvents() {
+    const deviceNameInput = this.shadowRoot.querySelector("[data-device-name-input]");
+    if (deviceNameInput) {
+      deviceNameInput.addEventListener("focus", (event) => {
+        this._deviceNameEditing = true;
+        this._deviceNameDraft = String(event.target.value || "");
+      });
+      deviceNameInput.addEventListener("input", (event) => {
+        this._deviceNameEditing = true;
+        this._deviceNameDraft = String(event.target.value || "");
+      });
+      deviceNameInput.addEventListener("blur", (event) => this._saveDeviceNameFromInput(event.target));
+      deviceNameInput.addEventListener("keydown", (event) => {
+        if (event.key === "Enter") {
+          event.preventDefault();
+          event.target.blur();
+        }
+      });
+    }
+
     this.shadowRoot.querySelectorAll("[data-action]").forEach((element) => {
       element.addEventListener("click", (event) => {
         const action = element.dataset.action;
@@ -5132,6 +5866,11 @@ class GrowcubeCard extends HTMLElement {
         } else if (action === "navigate-channel") {
           this._deviceMenuOpen = false;
           this._navigateToChannel(element.dataset.channel, element.dataset.deviceId || this._selectedDeviceId());
+        } else if (action === "open-settings-dialog") {
+          event.stopPropagation();
+          this._deviceMenuOpen = false;
+          this._settingsDialogOpen = true;
+          this._render();
         } else if (action === "toggle-device-menu") {
           event.stopPropagation();
           this._deviceMenuOpen = !this._deviceMenuOpen;
@@ -5222,6 +5961,32 @@ class GrowcubeCard extends HTMLElement {
           this._press(element.dataset.entity || this._entities().mark_tank_full)
             .then(() => this._showToast("Tank marked full"))
             .catch(() => this._showError("Could not update tank"));
+        } else if (action === "check-firmware") {
+          event.stopPropagation();
+          this._firmwareActionPending = "checking";
+          this._render();
+          this._press(element.dataset.entity || this._entities().check_firmware)
+            .then(() => {
+              this._firmwareActionPending = "";
+              this._dashboardDevicesLoadedAt = 0;
+              this._loadDashboardDevicesIfNeeded(true);
+              this._showToast("Firmware check started");
+            })
+            .catch(() => {
+              this._firmwareActionPending = "";
+              this._render();
+              this._showError("Could not check firmware");
+            });
+        } else if (action === "update-firmware") {
+          event.stopPropagation();
+          this._firmwareUpdateAcknowledged = false;
+          this._firmwareUpdateDialogOpen = true;
+          this._render();
+        } else if (action === "reset-network") {
+          event.stopPropagation();
+          this._resetNetworkAcknowledged = false;
+          this._resetNetworkDialogOpen = true;
+          this._render();
         } else if (action === "refresh-activity") {
           event.stopPropagation();
           this._refreshAllHistory();
@@ -5298,6 +6063,32 @@ class GrowcubeCard extends HTMLElement {
           this._closeDeletePlantDialog();
         } else if (action === "confirm-delete-plant") {
           this._confirmDeletePlant();
+        } else if (action === "close-settings-dialog" && event.target === element) {
+          this._settingsDialogOpen = false;
+          this._render();
+        } else if (action === "close-settings-button") {
+          this._settingsDialogOpen = false;
+          this._render();
+        } else if (action === "close-firmware-update-dialog" && event.target === element) {
+          this._closeFirmwareUpdateDialog();
+        } else if (action === "close-firmware-update-button") {
+          this._closeFirmwareUpdateDialog();
+        } else if (action === "toggle-firmware-update-ack") {
+          event.stopPropagation();
+          this._firmwareUpdateAcknowledged = element.checked;
+          this._render();
+        } else if (action === "confirm-firmware-update") {
+          this._confirmFirmwareUpdate();
+        } else if (action === "close-reset-network-dialog" && event.target === element) {
+          this._closeResetNetworkDialog();
+        } else if (action === "close-reset-network-button") {
+          this._closeResetNetworkDialog();
+        } else if (action === "toggle-reset-network-ack") {
+          event.stopPropagation();
+          this._resetNetworkAcknowledged = element.checked;
+          this._render();
+        } else if (action === "confirm-reset-network") {
+          this._confirmResetNetwork();
         } else if (action === "close-edit-dialog" && event.target === element) {
           this._closeEditDialog();
         } else if (action === "close-edit-button") {
